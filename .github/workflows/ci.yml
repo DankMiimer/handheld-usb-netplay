@@ -1,0 +1,13 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck dash busybox
+      - name: tests (dash)
+        run: sh tests/run.sh
+      - name: usbnp tests under busybox ash
+        run: USBNP_TEST_SHELL="busybox ash" bash tests/test_usbnp.sh

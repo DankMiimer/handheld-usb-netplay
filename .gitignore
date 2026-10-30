@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+usb-netplay/state/
+usb-netplay/usbnp.log
+usb-netplay/last-run.txt
+usb-netplay/settings.conf
+dist/

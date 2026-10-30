@@ -1,0 +1,419 @@
+#!/bin/sh
+# usbnp: RetroArch netplay over a USB cable between Linux handhelds.
+#
+# Run by the menu entries ("USB Netplay.sh", "USB Netplay - Remove.sh"), by
+# its udev rules and by its own background loop. See README.md and
+# docs/HOW_IT_WORKS.md.
+#
+#   usbnp menu | menu-remove      what the menu entries run (shows the result)
+#   usbnp setup | remove | status
+#   usbnp link-up IFACE | link-down IFACE    (udev, host side)
+#   usbnp watch                   background loop (service)
+#   usbnp rebind-adb              (udev, KNULLI ADB mode)
+#   usbnp hosts-adb up|down       (the ADB tunnel helper)
+# shellcheck shell=sh
+# shellcheck disable=SC3043   # local: busybox ash, dash and bash all have it
+
+USBNP_VERSION=0.1.0
+HERE=$(cd "$(dirname "$0")" && pwd)
+export USBNP_HERE="$HERE"
+
+# shellcheck source=lib/common.sh
+. "$HERE/lib/common.sh"
+# shellcheck source=lib/detect.sh
+. "$HERE/lib/detect.sh"
+# shellcheck source=lib/caps.sh
+. "$HERE/lib/caps.sh"
+# shellcheck source=lib/net.sh
+. "$HERE/lib/net.sh"
+# shellcheck source=lib/ui.sh
+. "$HERE/lib/ui.sh"
+
+if [ -z "$R" ] && [ "$(id -u)" != 0 ]; then
+    # dArkOS runs Ports as ark, with passwordless sudo
+    have sudo && exec sudo -n /bin/sh "$0" "$@"
+    echo "usbnp: needs root" >&2
+    exit 1
+fi
+
+detect_firmware
+STATE="$R$BASE/state"
+LOG="$R$BASE/usbnp.log"
+[ -d "$R$BASE" ] || LOG=
+SUBNET=$(subnet_of_id "$(device_id)")
+FALLBACK_HOST=$(get_key "$BASE/settings.conf" FALLBACK_HOST)
+PY=$(command -v python3 2>/dev/null)
+[ -f "$HERE/lib/fw/$FW.sh" ] && . "$HERE/lib/fw/$FW.sh"
+
+# --- generic pieces the firmware files use ----------------------------------
+
+UDEV_RULES=90-usb-netplay.rules
+DRV_MATCH="cdc_ncm|cdc_ether|rndis_host|cdc_eem|cdc_subset"
+
+udev_rules_install() {
+    put_file "$UDEV_DIR/$UDEV_RULES" <<EOF
+# USB Netplay (installed by USB Netplay; "USB Netplay - Remove" deletes it):
+# when another handheld's USB network interface comes or goes on this
+# handheld's host port, wake USB Netplay's background loop, which sets the
+# link up or down. (Not done here: udev kills whatever a rule started once the
+# event is handled, and finding the other handheld can take a few seconds.)
+ACTION=="add|remove", SUBSYSTEM=="net", ENV{ID_USB_DRIVER}=="$DRV_MATCH", RUN+="/bin/sh $BASE/usbnp poke"
+EOF
+}
+
+systemd_service_install() {
+    put_file "$UNIT_DIR/usb-netplay.service" <<EOF
+# USB Netplay's background loop (installed by USB Netplay).
+# Type=simple and deliberately no After=/Before=: nothing in the boot waits for it.
+[Unit]
+Description=USB Netplay: keep the USB cable link up
+
+[Service]
+Type=simple
+ExecStart=/bin/sh $BASE/usbnp watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    bk_file "$UNIT_DIR/multi-user.target.wants/usb-netplay.service"
+    mkdir -p "$R$UNIT_DIR/multi-user.target.wants"
+    ln -sf ../usb-netplay.service "$R$UNIT_DIR/multi-user.target.wants/usb-netplay.service"
+    run systemctl daemon-reload
+    run systemctl restart usb-netplay.service
+}
+
+systemd_service_remove() {
+    run systemctl stop usb-netplay.service
+}
+
+# connman_blacklist FILE: keep connman away from USB network interfaces.
+# On ROCKNIX/AmberELEC FILE (connman_main.conf) replaces main.conf entirely,
+# so it starts as a copy of it.
+connman_blacklist() {
+    local f cur
+    f=$1
+    if [ ! -f "$R$f" ]; then
+        [ -f "$R/etc/connman/main.conf" ] || return 0
+        bk_file "$f"
+        cp "$R/etc/connman/main.conf" "$R$f"
+    fi
+    cur=$(get_key "$f" NetworkInterfaceBlacklist)
+    case ",$cur," in *,usb,*) return 0 ;; esac
+    set_key "$f" NetworkInterfaceBlacklist "usb,gadget,rndis${cur:+,$cur}"
+    NOTE_NETMGR="connman will leave USB links alone after the next restart"
+    NEEDS_REBOOT=1
+}
+
+retroarch_keys() {
+    set_key "$1" netplay_nat_traversal false ra
+    set_key "$1" netplay_public_announce false ra
+    set_key "$1" netplay_use_mitm_server false ra
+    set_key "$1" netplay_ip_address "$NETPLAY_NAME" ra
+    set_key "$1" netplay_ip_port 55435 ra
+}
+
+# gadget_peer_name PEER [IFACE]: while a host is connected to this handheld's
+# gadget, usb-netplay points at that host (unless a host-side link is newer)
+gadget_peer_name() {
+    local car ifc cur
+    ifc=${2:-gadget}
+    car=$(cat "$R/sys/class/net/$ifc/carrier" 2>/dev/null)
+    cur=$(hosts_get "$NETPLAY_NAME")
+    if [ "$car" = 1 ]; then
+        ls "$STATE/links" 2>/dev/null | grep -q . && return 0
+        [ "$cur" = "$1" ] || hosts_set "$NETPLAY_NAME" "$1"
+    elif [ "$cur" = "$1" ]; then
+        hosts_set "$NETPLAY_NAME" "$FALLBACK_HOST"
+    fi
+}
+
+install_runtime() {
+    [ "$HERE" = "$R$BASE" ] && return 0
+    mkdir -p "$R$BASE"
+    rm -rf "$R${BASE:?}/lib" "$R${BASE:?}/adb"
+    cp -r "$HERE/usbnp" "$HERE/lib" "$HERE/adb" "$R$BASE/"
+    [ -f "$HERE/settings.conf" ] && cp "$HERE/settings.conf" "$R$BASE/settings.conf"
+    chmod 755 "$R$BASE/usbnp" 2>/dev/null
+    return 0
+}
+
+supported() { [ "$DEV_MODE" != none ] || [ "$HOST_OK" = 1 ]; }
+
+# with no cable link, usb-netplay points at FALLBACK_HOST (or nowhere);
+# also needed after every boot, which rebuilds the hosts file
+apply_fallback() {
+    ls "$STATE/links" 2>/dev/null | grep -q . && return 0
+    [ -n "$FALLBACK_HOST" ] || return 0
+    [ -n "$(hosts_get "$NETPLAY_NAME")" ] || hosts_set "$NETPLAY_NAME" "$FALLBACK_HOST"
+}
+
+# --- commands --------------------------------------------------------------
+
+cmd_setup() {
+    caps_probe
+    if ! supported; then
+        NOT_SUPPORTED=1
+        return 1
+    fi
+    install_runtime
+    LOG="$R$BASE/usbnp.log"
+    mkdir -p "$STATE"
+    udev_rules_install
+    fw_hooks_extra
+    fw_netmgr
+    fw_retroarch
+    fw_gadget_setup
+    run udevadm control --reload
+    fw_service_install
+    # a cable that's already plugged in: set it up now, not at the next replug
+    local i
+    for i in $(ls "$R/sys/class/net" 2>/dev/null); do
+        is_usb_net "$i" && [ ! -f "$STATE/links/$i" ] && link_up_locked "$i"
+    done
+    FALLBACK_HOST=$(get_key "$BASE/settings.conf" FALLBACK_HOST)
+    apply_fallback
+    log "setup done ($FW_LABEL, $DEV_MODE, host $HOST_OK)"
+    return 0
+}
+
+cmd_remove() {
+    fw_service_remove
+    own_gadget_down
+    [ "$(hosts_get "$NETPLAY_NAME")" ] && hosts_set "$NETPLAY_NAME" ""
+    undo_all
+    run udevadm control --reload
+    [ -n "$UNIT_DIR" ] && run systemctl daemon-reload
+    rm -rf "$STATE/links"
+    log "removed"
+    if [ "$HERE" != "$R$BASE" ]; then
+        rm -rf "$R$BASE"
+    fi
+}
+
+link_up_locked() {
+    local l p
+    l="$STATE/lock.$1"
+    mkdir -p "$STATE"
+    if ! mkdir "$l" 2>/dev/null; then
+        # held by a run that was killed? then take it over
+        p=$(cat "$l/pid" 2>/dev/null)
+        [ -n "$p" ] && kill -0 "$p" 2>/dev/null && return 0
+        rm -rf "$l"
+        mkdir "$l" 2>/dev/null || return 0
+    fi
+    echo $$ > "$l/pid"
+    link_up "$1"
+    rm -rf "$l"
+}
+
+ping_ms() {
+    [ -n "$USBNP_DRYRUN" ] && { echo "?"; return; }
+    ping -c 1 -W 1 "$1" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -n 1
+}
+
+cores_report() {
+    local d c f
+    for d in /tmp/cores /usr/lib/libretro /home/ark/.config/retroarch/cores /opt/muos/share/core; do
+        [ -d "$R$d" ] || continue
+        printf 'Cores in %s (netplay needs the same build on both handhelds):\n' "$d"
+        for c in nestopia fceumm snes9x gambatte mgba genesis_plus_gx genesisplusgx beetle_pce_fast pce_fast; do
+            f="$R$d/${c}_libretro.so"
+            [ -f "$f" ] && printf '  %-16s %s\n' "$c" "$(md5sum < "$f" | cut -c1-8)"
+        done
+        return 0
+    done
+}
+
+cmd_status() {
+    local f peer ms tunnel name gif
+    [ -n "$DEV_MODE$HOST_OK" ] || caps_probe
+    echo "USB Netplay $USBNP_VERSION: $FW_LABEL on ${DEVICE:-this handheld}"
+    if [ -n "$NOT_SUPPORTED" ]; then
+        echo "Not supported here: $DEV_WHY."
+        echo "Nothing was changed."
+        return 0
+    fi
+    case "$DEV_MODE" in
+        native|own) echo "As the USB device: yes, $DEV_WHY; its cable address is $SUBNET.2" ;;
+        adb|devlink) echo "As the USB device: yes, $DEV_WHY" ;;
+        *) echo "As the USB device: no ($DEV_WHY)" ;;
+    esac
+    [ "$HOST_OK" = 1 ] && echo "As the USB host (OTG adapter on this one): yes" || echo "As the USB host: no"
+    echo "Links now:"
+    name=0
+    for f in "$STATE"/links/*; do
+        [ -f "$f" ] || continue
+        peer=$(sed -n 's/^peer=//p' "$f")
+        ms=$(ping_ms "$peer")
+        echo "  $(basename "$f"): the other handheld is $peer ($(sed -n 's/^how=//p' "$f")), ping ${ms:-no answer} ms"
+        name=1
+    done
+    # this handheld as the USB device: the host on the other end is .1
+    gif=
+    [ -e "$R/sys/class/net/gadget" ] && gif=gadget
+    [ -z "$gif" ] && [ -d "$R$GADGETS/usbnp" ] && gif=$(cat "$R$GADGETS/usbnp/functions/$OWN_FUNC.usb0/ifname" 2>/dev/null)
+    if [ -n "$gif" ] && [ "$(cat "$R/sys/class/net/$gif/carrier" 2>/dev/null)" = 1 ]; then
+        ms=$(ping_ms "$SUBNET.1")
+        echo "  $gif (this handheld is the USB device): the other handheld is $SUBNET.1, ping ${ms:-no answer} ms"
+        name=1
+    fi
+    tunnel=$({ ps -eo args 2>/dev/null || ps -o args 2>/dev/null; } | grep -c "[a]db/tunnel.py")
+    [ "${tunnel:-0}" -gt 0 ] && echo "  ADB tunnel: waiting for or serving an ADB-only handheld"
+    [ "$name" = 1 ] || echo "  none (plug the other handheld in; the OTG adapter goes on the host)"
+    name=$(hosts_get "$NETPLAY_NAME")
+    if [ -z "$name" ]; then
+        echo "Pre-filled netplay host: $NETPLAY_NAME -> not set (no cable link; FALLBACK_HOST in settings.conf is empty)"
+    elif [ "$name" = "$FALLBACK_HOST" ]; then
+        echo "Pre-filled netplay host: $NETPLAY_NAME -> $name (FALLBACK_HOST, no cable link)"
+    else
+        echo "Pre-filled netplay host: $NETPLAY_NAME -> $name"
+    fi
+    [ -n "$NOTE_NETMGR" ] && echo "Note: $NOTE_NETMGR."
+    [ -n "$NOTE_SERVICE" ] && echo "Note: USB Netplay $NOTE_SERVICE."
+    [ -n "$NEEDS_REBOOT" ] && echo "Restart this handheld once to finish the setup."
+    echo "To play: host the game on one handheld, then on the other choose"
+    echo "Netplay > Connect to Netplay Host (or Refresh Netplay Host List)."
+    cores_report
+}
+
+cmd_watch() {
+    local tpid f i
+    caps_probe
+    mkdir -p "$STATE"
+    echo $$ > "$STATE/watch.pid"
+    [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 262144 ] && : > "$LOG"
+    log "watch: started ($FW_LABEL, device mode $DEV_MODE, host $HOST_OK)"
+    rm -rf "$STATE"/lock.* "$STATE"/tried.* 2>/dev/null
+    trap 'WAKE=1' USR1
+    while :; do
+        apply_fallback
+        fw_watch_tick
+        for f in "$STATE"/links/*; do
+            [ -f "$f" ] || continue
+            i=$(basename "$f")
+            if [ ! -e "$R/sys/class/net/$i" ]; then
+                link_down "$i"
+            elif [ -z "$USBNP_DRYRUN" ] && ! ip -4 -o addr show dev "$i" 2>/dev/null | grep -q " $(sed -n 's/^me=//p' "$f")/"; then
+                # the interface came back under the same name (a quick replug
+                # or a USB reset of the other handheld) without our address
+                log "watch: $i lost its address, setting the link up again"
+                link_down "$i"
+                link_up_locked "$i"
+            elif ping_ok "$(sed -n 's/^peer=//p' "$f")"; then
+                rm -f "$STATE/fails.$i"
+            else
+                # the other handheld changed its address (or stopped answering):
+                # after 3 misses in a row, look it up again
+                echo x >> "$STATE/fails.$i"
+                if [ "$(wc -l < "$STATE/fails.$i")" -ge 3 ]; then
+                    log "watch: $i peer stopped answering, looking it up again"
+                    rm -f "$STATE/fails.$i" "$STATE/tried.$i"
+                    link_down "$i"
+                fi
+            fi
+        done
+        for f in "$STATE"/tried.*; do
+            [ -e "$f" ] || continue
+            if [ ! -e "$R/sys/class/net/${f##*/tried.}" ]; then
+                rm -f "$f"
+            else
+                # nothing answered last time (the other handheld may still be
+                # starting): try again every 30 s
+                echo x >> "$f"
+                [ "$(wc -l < "$f")" -ge 6 ] && rm -f "$f"
+            fi
+        done
+        # interfaces udev reported before the rules were loaded (at boot)
+        for i in $(ls "$R/sys/class/net" 2>/dev/null); do
+            is_usb_net "$i" || continue
+            [ -f "$STATE/links/$i" ] || [ -f "$STATE/tried.$i" ] || { touch "$STATE/tried.$i"; link_up_locked "$i"; }
+        done
+        if [ -n "$PY" ] && [ "$HOST_OK" = 1 ] && [ -z "$USBNP_DRYRUN" ]; then
+            if [ -z "$tpid" ] || ! kill -0 "$tpid" 2>/dev/null; then
+                "$PY" -u "$HERE/adb/tunnel.py" >> "$LOG" 2>&1 &
+                tpid=$!
+            fi
+        fi
+        [ -n "$USBNP_WATCH_ONCE" ] && return 0
+        # 5 s, or less when the udev rule pokes (USR1) about a USB link
+        WAKE=
+        i=0
+        while [ $i -lt 5 ] && [ -z "$WAKE" ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+    done
+}
+
+cmd_poke() {
+    local p
+    p=$(cat "$STATE/watch.pid" 2>/dev/null)
+    [ -n "$p" ] && kill -USR1 "$p" 2>/dev/null
+    return 0
+}
+
+cmd_rebind_adb() {
+    local g n u
+    g=$(adb_gadget) || return 0
+    g="$R$GADGETS/$g"
+    sleep 1   # let adbd write its descriptors again
+    n=0
+    while [ $n -lt 8 ]; do
+        [ -d "$g/functions/ffs.adb" ] && pidof adbd >/dev/null || return 0
+        [ -n "$(cat "$g/UDC" 2>/dev/null)" ] && return 0
+        u=$(first_udc)
+        if [ -n "$u" ] && echo "$u" > "$g/UDC" 2>/dev/null; then
+            log "rebind-adb: $(basename "$g") bound to $u again"
+            return 0
+        fi
+        sleep 1
+        n=$((n + 1))
+    done
+    log "rebind-adb: could not bind $(basename "$g")"
+}
+
+cmd_hosts_adb() {
+    case "$1" in
+        up) [ "$(hosts_get "$NETPLAY_NAME")" = 127.0.0.1 ] || hosts_set "$NETPLAY_NAME" 127.0.0.1 ;;
+        down) [ "$(hosts_get "$NETPLAY_NAME")" = 127.0.0.1 ] && hosts_set "$NETPLAY_NAME" "$FALLBACK_HOST" ;;
+    esac
+}
+
+cmd_menu() {
+    local report rc
+    report="$HERE/last-run.txt"
+    if [ "$1" = remove ]; then
+        cmd_remove
+        {
+            echo "USB Netplay was removed from this handheld."
+            echo "Its udev rules and background service are gone and the settings it changed are back as they were."
+        } > "$report"
+        ui_show "USB Netplay" "$report"
+        return 0
+    fi
+    cmd_setup; rc=$?
+    cmd_status > "$report" 2>&1
+    [ -d "$R$BASE" ] && cp "$report" "$R$BASE/last-run.txt" 2>/dev/null
+    ui_show "USB Netplay" "$report"
+    [ $rc = 0 ] && [ -n "$RESTART_FRONTEND" ] && fw_restart_frontend
+    return 0
+}
+
+case "$1" in
+    menu) cmd_menu ;;
+    menu-remove) cmd_menu remove ;;
+    setup) cmd_setup; cmd_status ;;
+    remove) cmd_remove ;;
+    status) cmd_status ;;
+    link-up) link_up_locked "$2" ;;
+    link-down) link_down "$2" ;;
+    watch) cmd_watch ;;
+    poke) cmd_poke ;;
+    rebind-adb) cmd_rebind_adb ;;
+    hosts-adb) cmd_hosts_adb "$2" ;;
+    detect) caps_probe; printf 'FW=%s\nBASE=%s\nDEV_MODE=%s\nHOST_OK=%s\nSUBNET=%s\nOWN_FUNC=%s\n' "$FW" "$BASE" "$DEV_MODE" "$HOST_OK" "$SUBNET" "$OWN_FUNC" ;;
+    version) echo "$USBNP_VERSION" ;;
+    *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
