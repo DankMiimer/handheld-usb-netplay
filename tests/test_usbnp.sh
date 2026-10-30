@@ -219,6 +219,21 @@ for n in 1 2 3; do
 done
 check "watch: re-finds a peer that stopped answering" "peer=10.188.3.2" "$(grep peer= "$ROOT/storage/.config/usb-netplay/state/links/usb1")"
 
+echo "== watch: a handheld that answers late (RG Nano USB Link) is tried again after 10 s"
+make_root rocknix-nm "$ROOT"
+u setup >/dev/null 2>&1
+usb_netdev "$ROOT" usb0 cdc_ncm ""
+LINKS=$ROOT/storage/.config/usb-netplay/state/links
+watch_once() { USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 USBNP_PING_FAILS=$1 $SH "$USBNP" watch </dev/null; }
+watch_once all
+check "late: nothing answered at first" "" "$(ls "$LINKS")"
+watch_once ""
+check "late: not tried again after 5 s" "" "$(ls "$LINKS")"
+watch_once ""
+check "late: tried again after 10 s" "peer=10.170.0.5" "$(grep peer= "$LINKS/usb0" 2>/dev/null)"
+for n in 1 2 3 4 5 6; do watch_once ""; done
+check "late: a linked interface isn't retried" 0 "$(ls "$ROOT/storage/.config/usb-netplay/state" | grep -c '^tried\.')"
+
 echo "== hosts-adb (the ADB helper)"
 make_root knulli-h700 "$ROOT"
 u setup >/dev/null 2>&1

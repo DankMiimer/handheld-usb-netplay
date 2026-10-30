@@ -134,8 +134,10 @@ tested with a join.
 - Two handhelds that can only be the host, such as an AmberELEC and a dArkOS
   handheld. One side must be able to be the USB device.
 - The RG Nano (FunKey OS) has no RetroArch netplay. Its
-  [USB Link](https://github.com/DankMiimer/rg-nano-adb-tools) app can still
-  bring up a cable link to it, and USB Netplay recognises that link.
+  [USB Link](https://github.com/DankMiimer/rg-nano-adb-tools) app (with
+  `NETWORK=ncm`) can still bring up a cable link to it. USB Netplay finds the
+  Nano at its default address. Tested with an RG DS as the host: the link was
+  up 8 seconds after the Nano's network interface appeared, ping about 2 ms.
 
 Tried it on another handheld? Please open an issue with `last-run.txt` from
 the `usb-netplay` folder, whether it worked or not.

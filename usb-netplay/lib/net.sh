@@ -48,7 +48,9 @@ mask2prefix() {
 
 ping_ok() {
     if [ -n "$USBNP_DRYRUN" ]; then
-        # tests: everything answers, except with USBNP_PING_FAILS=1 the address .99
+        # tests: everything answers, except with USBNP_PING_FAILS=1 the address
+        # .99, and with USBNP_PING_FAILS=all nothing
+        [ "$USBNP_PING_FAILS" = all ] && return 1
         [ -n "$USBNP_PING_FAILS" ] && [ "${1##*.}" = 99 ] && return 1
         return 0
     fi

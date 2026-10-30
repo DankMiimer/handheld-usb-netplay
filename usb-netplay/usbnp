@@ -14,7 +14,7 @@
 # shellcheck shell=sh
 # shellcheck disable=SC3043   # local: busybox ash, dash and bash all have it
 
-USBNP_VERSION=0.1.0
+USBNP_VERSION=0.1.1
 HERE=$(cd "$(dirname "$0")" && pwd)
 export USBNP_HERE="$HERE"
 
@@ -285,7 +285,8 @@ cmd_watch() {
     echo $$ > "$STATE/watch.pid"
     [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 262144 ] && : > "$LOG"
     log "watch: started ($FW_LABEL, device mode $DEV_MODE, host $HOST_OK)"
-    rm -rf "$STATE"/lock.* "$STATE"/tried.* 2>/dev/null
+    # a fresh start forgets earlier attempts (tests run one loop at a time and keep them)
+    [ -n "$USBNP_WATCH_ONCE" ] || rm -rf "$STATE"/lock.* "$STATE"/tried.* 2>/dev/null
     trap 'WAKE=1' USR1
     while :; do
         apply_fallback
@@ -316,13 +317,15 @@ cmd_watch() {
         done
         for f in "$STATE"/tried.*; do
             [ -e "$f" ] || continue
-            if [ ! -e "$R/sys/class/net/${f##*/tried.}" ]; then
+            i=${f##*/tried.}
+            if [ ! -e "$R/sys/class/net/$i" ] || [ -f "$STATE/links/$i" ]; then
                 rm -f "$f"
             else
                 # nothing answered last time (the other handheld may still be
-                # starting): try again every 30 s
+                # starting; the RG Nano's USB Link sets its address only once a
+                # host has connected): try again after 10 s, then every 30 s
                 echo x >> "$f"
-                [ "$(wc -l < "$f")" -ge 6 ] && rm -f "$f"
+                [ $(($(wc -l < "$f") % 6)) = 2 ] && link_up_locked "$i"
             fi
         done
         # interfaces udev reported before the rules were loaded (at boot)

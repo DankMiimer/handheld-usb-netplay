@@ -135,7 +135,9 @@ running, so the tunnel comes back after a replug.
 - **The background loop** (`usbnp watch`) runs as a service and wakes every
   5 seconds, or at once when poked. It:
   - sets up interfaces that have no link yet, and drops links whose
-    interface is gone;
+    interface is gone. Where nothing answered, it tries again after 10 s,
+    then every 30 s. The RG Nano's USB Link, for one, sets its address only
+    after the host has connected;
   - sets a link up again if its address was lost, and looks again after 3
     failed pings, for example when the other handheld was re-addressed;
   - keeps ROCKNIX's gadget up with its address and DHCP server, because
