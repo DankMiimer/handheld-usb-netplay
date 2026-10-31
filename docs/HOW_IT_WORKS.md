@@ -63,13 +63,27 @@ some firmwares use by default.
 When a USB network interface appears, `link_up` tries these in order:
 
 1. **The USB serial number.** A USB Netplay gadget carries its address there.
-2. **DHCP.** `dhcp_probe.py` sends one DHCP DISCOVER on a raw packet socket,
+2. **Not a handheld at all?** An interface with a maker-assigned MAC
+   address (the kernel names those `ethN`) is a USB Ethernet adapter, and is
+   left alone without being probed.
+3. **DHCP.** `dhcp_probe.py` sends one DHCP DISCOVER on a raw packet socket,
    which works on an interface that has no address yet, and reads the offer.
    The server is the other handheld, and the offered address is ours. Nothing
    is leased and no DHCP client is started (KNULLI has none anyway).
-3. **Known static gadget addresses:** `10.170.0.5` (the RG Nano's USB Link
+   A handheld's offer has no gateway and no DNS server. An offer that has one
+   comes from a phone sharing its connection (USB tethering) or a real
+   network, so the interface is left alone.
+4. **Known static gadget addresses:** `10.170.0.5` (the RG Nano's USB Link
    app), `169.254.170.2` (ROCKNIX default) and `10.1.1.2` (JELOS). Each is
-   tried with a ping.
+   tried with a ping, but only on devices with a handheld gadget's USB ID
+   (`1d6b:0104`, the Nano's `8087:011e`, the kernel's `0525:a4a1`/`a4a2`).
+
+"Left alone" means no address, route or hosts entry is set. The status lists
+the interface as "not a handheld". On firmwares where USB Netplay told the
+network manager to ignore `usb*` interfaces (section 7), the interface is
+renamed `tetherN` as well. connman and NetworkManager look at a renamed
+interface again, so the phone's connection works as it would without USB
+Netplay.
 
 The host then sets only:
 
@@ -167,6 +181,11 @@ KNULLI) drop Wi-Fi in favour of it.
   added by a block in `/boot/boot-custom.sh`, because the main config is
   rebuilt at boot. Either way, connman reads it at the next start, which is
   why the status asks for one restart.
+- **Phones on USB tethering** also show up as `usb0` and would be hidden by
+  those lists. USB Netplay recognises them (section 3) and renames them
+  `tetherN`. connman re-reads an ignored interface's details on every link
+  change (`read_uevent` in its `src/rtnl.c`), so it picks the phone up under
+  the new name.
 
 ## 8. RetroArch settings
 

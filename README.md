@@ -154,6 +154,12 @@ the `usb-netplay` folder, whether it worked or not.
 - **Nothing on the other end.** Check that the OTG adapter is on the host and
   that you used the data port. Then open USB Netplay on both and read
   *Links now*.
+- **A phone (USB tethering) or a USB Ethernet adapter.** USB Netplay only
+  takes over links to other handhelds. A phone sharing its connection offers
+  a gateway, and an Ethernet adapter has a maker-assigned MAC address, so both
+  are left alone, and the status lists them as "not a handheld". On KNULLI,
+  Batocera, AmberELEC, dArkOS and connman builds of ROCKNIX, a phone's link
+  is renamed `tether0` so the network manager uses it as usual.
 - **It joined over Wi-Fi.** The cable wasn't linked yet when you joined. Run
   USB Netplay to check the link, then rejoin.
 - **Logs.** The installed copy lives in `/storage/.config/usb-netplay`

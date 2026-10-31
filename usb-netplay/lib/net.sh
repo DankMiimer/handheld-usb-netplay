@@ -13,6 +13,10 @@
 # carry one in their USB serial: "peer this-end" pairs.
 STATIC_PEERS="10.170.0.5:10.170.0.6 169.254.170.2:169.254.170.1 10.1.1.2:10.1.1.1"
 USB_NET_DRIVERS="cdc_ncm cdc_ether rndis_host cdc_eem cdc_subset"
+# USB IDs of handheld network gadgets, the only ones tried at the static
+# addresses above: Linux's multifunction gadget (ROCKNIX, JELOS, KNULLI, USB
+# Netplay's own), the RG Nano's FunKey OS, and the kernel's g_ether/g_ncm.
+HANDHELD_USB_IDS="1d6b:0104 8087:011e 0525:a4a1 0525:a4a2"
 
 ipcmd() { run ip "$@"; }
 # ipq ARGS: read-only ip queries (nothing in a dry run)
@@ -32,6 +36,22 @@ is_usb_net() {
     drv=$(if_driver "$1")
     case " $USB_NET_DRIVERS " in *" $drv "*) return 0 ;; esac
     return 1
+}
+
+usb_id() {
+    local dev
+    dev=$(usb_dev_dir "$1") || return 1
+    printf '%s:%s' "$(cat "$dev/idVendor" 2>/dev/null)" "$(cat "$dev/idProduct" 2>/dev/null)"
+}
+
+# real_nic IF: the interface has a maker-assigned (globally administered)
+# MAC address, as USB Ethernet adapters do. Handheld gadgets and phones use
+# locally administered ones (the kernel also names those usbN, the others ethN).
+real_nic() {
+    local mac
+    mac=$(cat "$R/sys/class/net/$1/address" 2>/dev/null)
+    [ -n "$mac" ] || return 1
+    [ $((0x${mac%%:*} & 2)) = 0 ]
 }
 
 mask2prefix() {
@@ -57,9 +77,11 @@ ping_ok() {
     ping -c 1 -W 1 "$1" >/dev/null 2>&1
 }
 
-# find_peer IF: prints "PEER ME HOW" for the handheld at the other end
+# find_peer IF: prints "PEER ME HOW" for the handheld at the other end, or
+# "- - network WHY" for something that isn't a handheld (a phone sharing its
+# connection, a USB Ethernet adapter), which is then left alone
 find_peer() {
-    local dev serial out ip mask srv pair p me
+    local dev serial out ip mask srv gw pair p me
     dev=$(usb_dev_dir "$1")
     serial=$(cat "$dev/serial" 2>/dev/null)
     # 1. a USB Netplay gadget carries its address in its serial number
@@ -69,6 +91,10 @@ find_peer() {
             printf '%s %s serial\n' "$ip" "${ip%.2}.1"
             return 0 ;;
     esac
+    if real_nic "$1"; then
+        printf '%s %s network %s\n' - - "a USB network adapter"
+        return 0
+    fi
     # 2. the gadget hands out an address (ROCKNIX's udhcpd): ask it
     ipcmd link set "$1" up
     if [ -n "$USBNP_FAKE_DHCP" ]; then
@@ -77,12 +103,19 @@ find_peer() {
         out=$("$PY" "$HERE/lib/dhcp_probe.py" "$1" 6 2>/dev/null)
     fi
     if [ -n "$out" ]; then
-        # shellcheck disable=SC2086   # "IP MASK SERVER" split into words on purpose
+        # shellcheck disable=SC2086   # "IP MASK SERVER GATEWAY" split into words on purpose
         set -- $out
-        ip=$1 mask=$2 srv=$3
+        ip=$1 mask=$2 srv=$3 gw=${4:--}
+        if [ "$gw" != - ]; then
+            # a handheld offers no gateway or DNS; a phone or a router does
+            printf '%s %s network %s\n' - - "a network with gateway $gw (a phone sharing its connection?)"
+            return 0
+        fi
         [ -n "$srv" ] && { printf '%s %s dhcp\n' "$srv" "$ip"; return 0; }
     fi
-    # 3. known static gadget addresses (RG Nano USB Link, ROCKNIX and JELOS defaults)
+    # 3. known static gadget addresses (RG Nano USB Link, ROCKNIX and JELOS
+    #    defaults), only for handheld gadgets: never ping-probe a phone
+    case " $HANDHELD_USB_IDS " in *" $(usb_id "$1") "*) : ;; *) return 1 ;; esac
     for pair in $STATIC_PEERS; do
         p=${pair%%:*} me=${pair#*:}
         ipcmd addr add "$me/32" dev "$IFACE"
@@ -101,14 +134,19 @@ link_up() {
     local peer me how
     IFACE=$1
     is_usb_net "$IFACE" || { log "link-up $IFACE: not a USB network interface ($(if_driver "$IFACE"))"; return 0; }
-    have nmcli && run nmcli device set "$IFACE" managed no >/dev/null 2>&1
-    # shellcheck disable=SC2046   # "PEER ME HOW" split into words on purpose
+    # shellcheck disable=SC2046   # "PEER ME HOW [WHY]" split into words on purpose
     set -- $(find_peer "$IFACE")
     peer=$1 me=$2 how=$3
+    if [ "$how" = network ]; then
+        shift 3
+        leave_alone "$IFACE" "$*"
+        return 0
+    fi
     if [ -z "$peer" ]; then
         log "link-up $IFACE: nothing answered on the other end"
         return 1
     fi
+    have nmcli && run nmcli device set "$IFACE" managed no >/dev/null 2>&1
     ipcmd link set "$IFACE" up
     ipcmd addr replace "$me/32" dev "$IFACE"
     ipcmd route replace "$peer/32" dev "$IFACE" src "$me"
@@ -118,6 +156,44 @@ link_up() {
     printf 'peer=%s\nme=%s\nhow=%s\nside=host\n' "$peer" "$me" "$how" > "$STATE/links/$IFACE"
     hosts_set "$NETPLAY_NAME" "$peer"
     log "link-up $IFACE: peer $peer ($how), this end $me"
+}
+
+# netmgr_hides_usb: USB Netplay's setup told this firmware's network manager to
+# ignore usb* and rndis* interfaces (the connman builds, and dArkOS)
+netmgr_hides_usb() {
+    case "$FW" in
+        knulli|batocera|amberelec|darkos) return 0 ;;
+        rocknix) [ ! -e "$R/etc/NetworkManager/NetworkManager.conf" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# leave_alone IF WHY: not a handheld, so no address or route is set. Where
+# USB Netplay made the network manager ignore this name, the interface is
+# renamed tetherN, so that a phone's USB tethering works as it would without
+# USB Netplay: connman and NetworkManager look at a renamed interface again.
+leave_alone() {
+    local ifc n note
+    ifc=$1 note=
+    if netmgr_hides_usb; then
+        case "$ifc" in
+            usb*|rndis*)
+                n=0
+                while [ -e "$R/sys/class/net/tether$n" ]; do n=$((n + 1)); done
+                ipcmd link set "$ifc" down
+                if ipcmd link set "$ifc" name "tether$n"; then
+                    rm -f "$STATE/tried.$ifc"
+                    ifc=tether$n
+                    note=" (renamed $ifc, for the network manager)"
+                fi
+                ipcmd link set "$ifc" up
+                ;;
+        esac
+    fi
+    mkdir -p "$STATE"
+    printf '%s\n' "$2" > "$STATE/ignored.$ifc"
+    rm -f "$STATE/tried.$ifc"
+    log "link-up $1: $2; not a handheld, left alone$note"
 }
 
 # link_down IF: the interface went away

@@ -31,13 +31,17 @@ A_CNXN, A_OPEN, A_OKAY, A_CLSE, A_WRTE, A_AUTH = (
 
 
 class DhcpProbeTest(unittest.TestCase):
-    def offer(self, xid, yiaddr='10.171.9.1', server='10.171.9.2', kind=2):
+    def offer(self, xid, yiaddr='10.171.9.1', server='10.171.9.2', kind=2, router=None, dns=None):
         pkt = bytearray(240)
         pkt[0] = 2
         pkt[4:8] = struct.pack('!I', xid)
         pkt[16:20] = socket.inet_aton(yiaddr)
         pkt[236:240] = dhcp_probe.MAGIC
         pkt += bytes([53, 1, kind, 1, 4]) + socket.inet_aton('255.255.255.0')
+        if router:
+            pkt += bytes([3, 4]) + socket.inet_aton(router)
+        if dns:
+            pkt += bytes([6, 8]) + socket.inet_aton(dns) + socket.inet_aton('8.8.8.8')
         pkt += bytes([54, 4]) + socket.inet_aton(server) + bytes([255])
         return bytes(pkt)
 
@@ -50,7 +54,14 @@ class DhcpProbeTest(unittest.TestCase):
         self.assertIn(bytes([53, 1, 1]), p[240:])
 
     def test_parse_offer(self):
-        self.assertEqual(dhcp_probe.parse_offer(self.offer(7), 7), ('10.171.9.1', '255.255.255.0', '10.171.9.2'))
+        self.assertEqual(dhcp_probe.parse_offer(self.offer(7), 7), ('10.171.9.1', '255.255.255.0', '10.171.9.2', '-'))
+        self.assertIn(bytes([55, 4, 1, 3, 6, 54]), dhcp_probe.discover_packet(bytes(6), 7))   # asks for router and DNS
+
+    def test_offer_from_a_network(self):
+        # a phone sharing its connection offers a router and DNS; a handheld neither
+        phone = self.offer(7, '192.168.42.47', '192.168.42.129', router='192.168.42.129', dns='192.168.42.129')
+        self.assertEqual(dhcp_probe.parse_offer(phone, 7)[3], '192.168.42.129')
+        self.assertEqual(dhcp_probe.parse_offer(self.offer(7, dns='10.0.0.53'), 7)[3], '10.0.0.53')
 
     def test_raw_packet(self):
         payload = dhcp_probe.discover_packet(bytes(6), 1)

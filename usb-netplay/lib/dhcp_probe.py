@@ -3,8 +3,10 @@
 
 ROCKNIX's USB network mode runs a DHCP server (udhcpd) that hands the USB host
 exactly one address. This sends one DHCPDISCOVER on the interface and prints
-the offer as "OFFERED_IP NETMASK SERVER_IP"; it never takes a lease or changes
-anything (usbnp sets the address itself, as a /32 without routes or DNS).
+the offer as "OFFERED_IP NETMASK SERVER_IP GATEWAY"; it never takes a lease or
+changes anything (usbnp sets the address itself, as a /32 without routes or
+DNS). GATEWAY is the offered router (or else DNS server), "-" when there is
+none: a handheld offers neither, a phone sharing its connection does.
 Standard library only, because KNULLI has no busybox udhcpc.
 
 usage: dhcp_probe.py IFACE [TIMEOUT_SECONDS]
@@ -26,14 +28,14 @@ def discover_packet(mac, xid):
                       1, 1, 6, 0, xid, 0, 0x8000,      # BOOTREQUEST, ethernet; ask for a broadcast reply
                       b'\0' * 4, b'\0' * 4, b'\0' * 4, b'\0' * 4,
                       mac.ljust(16, b'\0'), b'', b'')
-    opts = bytes([53, 1, 1,          # DHCPDISCOVER
-                  55, 3, 1, 3, 54,   # want: subnet mask, router, server id
+    opts = bytes([53, 1, 1,             # DHCPDISCOVER
+                  55, 4, 1, 3, 6, 54,   # want: subnet mask, router, DNS, server id
                   255])
     return hdr + MAGIC + opts
 
 
 def parse_offer(data, xid):
-    """(yiaddr, netmask, server) from a DHCPOFFER for xid, or None."""
+    """(yiaddr, netmask, server, gateway) from a DHCPOFFER for xid, or None."""
     if len(data) < 240 or data[0] != 2 or data[236:240] != MAGIC:
         return None
     if struct.unpack('!I', data[4:8])[0] != xid:
@@ -58,7 +60,12 @@ def parse_offer(data, xid):
     server = socket.inet_ntoa(opts[54]) if len(opts.get(54, b'')) == 4 else None
     if not server:
         return None
-    return yiaddr, mask, server
+    gateway = '-'
+    for code in (3, 6):   # a router, or else a DNS server: a real network
+        if len(opts.get(code, b'')) >= 4:
+            gateway = socket.inet_ntoa(opts[code][:4])
+            break
+    return yiaddr, mask, server, gateway
 
 
 def ip_checksum(hdr):
@@ -154,7 +161,7 @@ def main():
         return 2
     if not offer:
         return 1
-    print('%s %s %s' % offer)
+    print('%s %s %s %s' % offer)
     return 0
 
 

@@ -67,6 +67,7 @@ interface gadget
 start ${ip%.*}.1
 end ${ip%.*}.1
 opt subnet $(get_key "$NETCONF" NETMASK)
+option msstaticroutes 0.0.0.0/32 $ip
 opt lease 86400
 max_leases 1
 lease_file /dev/null

@@ -97,13 +97,18 @@ make_root() {
     esac
 }
 
-# usb_netdev DIR IFACE DRIVER [SERIAL]: a USB network interface from another
-# handheld on the host port (net/IFACE -> device -> interface dir of a USB device)
+# usb_netdev DIR IFACE DRIVER [SERIAL] [VID:PID] [MAC]: a USB network
+# interface from a device on the host port (net/IFACE -> device -> interface
+# dir of a USB device). Default: a handheld gadget, 1d6b:0104, with a locally
+# administered MAC address.
 usb_netdev() {
-    local d=$1 ifc=$2 drv=$3 serial=$4
+    local d=$1 ifc=$2 drv=$3 serial=$4 id=${5:-1d6b:0104} mac=${6:-12:34:56:78:9a:bc}
     local dev="$d/sys/devices/platform/ehci/usb1/1-1"
     mkdir -p "$dev/1-1:1.0/net/$ifc" "$d/sys/bus/usb/drivers/$drv"
     [ -n "$serial" ] && w "$dev/serial" "$serial"$'\n'
+    w "$dev/idVendor" "${id%:*}"$'\n'
+    w "$dev/idProduct" "${id#*:}"$'\n'
+    w "$dev/1-1:1.0/net/$ifc/address" "$mac"$'\n'
     ln -sfn "../../../../../../bus/usb/drivers/$drv" "$dev/1-1:1.0/driver"
     ln -sfn "../../devices/platform/ehci/usb1/1-1/1-1:1.0/net/$ifc" "$d/sys/class/net/$ifc"
     ln -sfn "../../../1-1:1.0" "$dev/1-1:1.0/net/$ifc/device"

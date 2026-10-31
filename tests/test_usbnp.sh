@@ -180,7 +180,7 @@ make_root knulli-h700 "$ROOT"
 u setup >/dev/null 2>&1
 usb_netdev "$ROOT" usb0 cdc_ncm "ffeeddccbbaa99887766554433221100"
 : > "$DRY"
-USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_FAKE_DHCP="10.171.9.1 255.255.255.0 10.171.9.2" $SH "$USBNP" link-up usb0
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_FAKE_DHCP="10.171.9.1 255.255.255.0 10.171.9.2 -" $SH "$USBNP" link-up usb0
 has "dhcp: this end from the offer" "run: ip addr replace 10.171.9.1/32 dev usb0" "$(cat "$DRY")"
 check "dhcp: usb-netplay points at the DHCP server" $'10.171.9.2\tusb-netplay' "$(grep usb-netplay "$ROOT/etc/hosts")"
 u link-down usb0
@@ -200,6 +200,45 @@ make_root rocknix-nm "$ROOT"
 mkdir -p "$ROOT/sys/class/net/wlan0"
 u link-up wlan0
 check "Wi-Fi is never touched" "" "$(cat "$DRY")"
+
+echo "== host side: phones and network adapters are left alone"
+PHONE_DHCP="192.168.42.47 255.255.255.0 192.168.42.129 192.168.42.129"
+make_root knulli-h700 "$ROOT"
+u setup >/dev/null 2>&1
+usb_netdev "$ROOT" usb0 cdc_ncm "" 18d1:4eeb
+: > "$DRY"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_FAKE_DHCP=$PHONE_DHCP $SH "$USBNP" link-up usb0
+dry=$(cat "$DRY")
+hasnt "phone: no address set" "addr replace" "$dry"
+hasnt "phone: no static addresses tried" "addr add" "$dry"
+has "phone: renamed, so connman takes it again (USB Netplay hid usb*)" "run: ip link set usb0 name tether0" "$dry"
+check "phone: usb-netplay untouched" "" "$(grep usb-netplay "$ROOT/etc/hosts")"
+has "phone: status says so" "tether0: not a handheld (a network with gateway 192.168.42.129" "$(u status)"
+
+make_root rocknix-nm "$ROOT"
+u setup >/dev/null 2>&1
+usb_netdev "$ROOT" usb0 rndis_host "" 18d1:4ee3
+: > "$DRY"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_FAKE_DHCP=$PHONE_DHCP $SH "$USBNP" link-up usb0
+dry=$(cat "$DRY")
+hasnt "phone on a NetworkManager build: not renamed (ROCKNIX's own config decides)" "name tether" "$dry"
+hasnt "phone on a NetworkManager build: no address set" "addr replace" "$dry"
+
+make_root knulli-h700 "$ROOT"
+u setup >/dev/null 2>&1
+usb_netdev "$ROOT" eth1 cdc_ncm "" 0bda:8156 00:e0:4c:68:01:02
+u link-up eth1
+check "USB Ethernet adapter (maker MAC): not touched at all" "" "$(grep 'run: ip' "$DRY")"
+: > "$DRY"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null
+hasnt "watch: an adapter that was left alone isn't probed again" "eth1" "$(cat "$DRY")"
+
+make_root knulli-h700 "$ROOT"
+u setup >/dev/null 2>&1
+usb_netdev "$ROOT" usb0 cdc_ncm "" 04e8:6863
+: > "$DRY"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY PATH=/nonexistent:/usr/bin:/bin $SH "$USBNP" link-up usb0 </dev/null
+hasnt "unknown device without a DHCP answer: no static addresses tried" "addr add" "$(cat "$DRY")"
 
 echo "== watch: a link missed by udev (boot) and a missed unplug"
 make_root rocknix-nm "$ROOT"
