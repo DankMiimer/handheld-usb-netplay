@@ -39,6 +39,18 @@ make_root() {
                 w "$d/etc/NetworkManager/NetworkManager.conf" $'[keyfile]\nunmanaged-devices=interface-name:gadget;interface-name:usb0\n'
             fi
             with_udc "$d" fcc00000.usb
+            w "$d/tmp/cores/nestopia_libretro.so" 'nestopia 1.54'
+            w "$d/tmp/cores/fceumm_libretro.so" 'fceumm rocknix build'
+            w "$d/storage/.config/emulationstation/es_systems.cfg" '<systemList>
+  <system>
+    <name>nes</name>
+    <emulators><emulator name="retroarch"><cores>
+      <core default="true">nestopia</core>
+      <core>fceumm</core>
+    </cores></emulator></emulators>
+  </system>
+</systemList>
+'
             ;;
         amberelec)
             w "$d/etc/os-release" $'NAME="AmberELEC"\nVERSION="20230203"\n'
@@ -58,6 +70,28 @@ make_root() {
             with_udc "$d" 5100000.udc-controller
             mkdir -p "$d/sys/kernel/config/usb_gadget/g1/functions/ffs.adb"
             w "$d/sys/kernel/config/usb_gadget/g1/UDC" $'5100000.udc-controller\n'
+            w "$d/usr/lib/libretro/nestopia_libretro.so" 'nestopia 1.54'
+            w "$d/usr/lib/libretro/fceumm_libretro.so" 'fceumm knulli build'
+            w "$d/usr/lib/libretro/genesisplusgx_libretro.so" 'genesis plus gx'
+            w "$d/usr/share/emulationstation/es_systems.cfg" '<systemList>
+  <system>
+    <fullname>Nintendo Entertainment System</fullname>
+    <name>nes</name>
+    <emulators>
+      <emulator name="libretro">
+        <cores>
+          <core default="true">fceumm</core>
+          <core>nestopia</core>
+        </cores>
+      </emulator>
+    </emulators>
+  </system>
+  <system>
+    <name>snes</name>
+    <emulators><emulator name="libretro"><cores><core default="true">snes9x</core></cores></emulator></emulators>
+  </system>
+</systemList>
+'
             ;;
         batocera)
             w "$d/etc/os-release" $'NAME=Batocera.linux\nVERSION_ID=43\n'

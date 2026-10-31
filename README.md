@@ -71,8 +71,16 @@ With the ADB tunnel (a KNULLI H700 or A133 handheld as the USB device), only
 one direction works: the handheld with the OTG adapter hosts, and the KNULLI
 handheld joins.
 
+When the cable link comes up or goes down, a short notice appears in the
+menu on ROCKNIX, AmberELEC, KNULLI and Batocera.
+
 Run **USB Netplay** again whenever you like. It repairs its setup and shows
-the link, the other handheld's address and the ping. The join message tells
+the link, the other handheld's address and the ping. When the other handheld
+runs USB Netplay too, the status also compares the two:
+- which netplay cores are the same build on both, and which differ (those can
+  refuse to connect or desync);
+- systems whose games start with a different default core on each side.
+  **Connect to Netplay Host** fails there with "host is running another core". The join message tells
 you which way you connected: a ping of about 2 ms means the cable, 20 ms and
 up means Wi-Fi. A game that is already running stays on Wi-Fi until you
 rejoin.
@@ -87,6 +95,8 @@ again.
   in, for example the Wi-Fi address of the handheld you usually play against.
   Leave it empty and **Connect to Netplay Host** only works over the cable
   (the host list still works on Wi-Fi).
+- `NOTIFY=no` turns off the notices when the cable link comes up or goes
+  down.
 
 ### Removing it
 
@@ -149,8 +159,9 @@ the `usb-netplay` folder, whether it worked or not.
   example Nestopia for NES; KNULLI defaults to FCEUmm, ROCKNIX to Nestopia),
   or join from **Refresh Netplay Host List**, which switches cores.
 - **The game desyncs or jumps.** The two handhelds have different builds of
-  the same core. Compare the checksums at the bottom of the status screen and
-  copy one handheld's core to the other.
+  the same core. The status names those cores when both handhelds run USB
+  Netplay 0.1.3 or newer; otherwise compare the checksums at the bottom of
+  each status screen. Then copy one handheld's core to the other.
 - **Nothing on the other end.** Check that the OTG adapter is on the host and
   that you used the data port. Then open USB Netplay on both and read
   *Links now*.

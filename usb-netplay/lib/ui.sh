@@ -3,6 +3,22 @@
 # needs its own way; the full report is always written to a file as well.
 # shellcheck shell=sh
 
+# ui_notify TEXT: a short notice in the menu, through EmulationStation's local
+# web API (ROCKNIX, AmberELEC, KNULLI, Batocera). Nothing happens where the
+# frontend has no such API or isn't running. NOTIFY=no in settings.conf turns
+# it off.
+ui_notify() {
+    [ "$NOTIFY" = no ] && return 0
+    [ -n "$USBNP_DRYRUN" ] && { run notify "$1"; return 0; }
+    case "$FW" in rocknix|amberelec|knulli|batocera) : ;; *) return 0 ;; esac
+    if have curl; then
+        curl -s -m 2 -o /dev/null -X POST --data-binary "$1" http://127.0.0.1:1234/notify 2>/dev/null
+    elif [ -n "$PY" ]; then
+        "$PY" -c 'import sys, urllib.request as u; u.urlopen(u.Request("http://127.0.0.1:1234/notify", sys.argv[1].encode()), timeout=2)' "$1" 2>/dev/null
+    fi
+    return 0
+}
+
 # ui_show TITLE FILE: show the report in FILE (first lines on small notifiers)
 ui_show() {
     local title file short

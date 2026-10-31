@@ -14,7 +14,7 @@
 # shellcheck shell=sh
 # shellcheck disable=SC3043   # local: busybox ash, dash and bash all have it
 
-USBNP_VERSION=0.1.2
+USBNP_VERSION=0.1.3
 HERE=$(cd "$(dirname "$0")" && pwd)
 export USBNP_HERE="$HERE"
 
@@ -26,6 +26,8 @@ export USBNP_HERE="$HERE"
 . "$HERE/lib/caps.sh"
 # shellcheck source=lib/net.sh
 . "$HERE/lib/net.sh"
+# shellcheck source=lib/info.sh
+. "$HERE/lib/info.sh"
 # shellcheck source=lib/ui.sh
 . "$HERE/lib/ui.sh"
 
@@ -42,6 +44,7 @@ LOG="$R$BASE/usbnp.log"
 [ -d "$R$BASE" ] || LOG=
 SUBNET=$(subnet_of_id "$(device_id)")
 FALLBACK_HOST=$(get_key "$BASE/settings.conf" FALLBACK_HOST)
+NOTIFY=$(get_key "$BASE/settings.conf" NOTIFY)
 PY=$(command -v python3 2>/dev/null)
 [ -f "$HERE/lib/fw/$FW.sh" ] && . "$HERE/lib/fw/$FW.sh"
 
@@ -117,10 +120,20 @@ retroarch_keys() {
 # gadget_peer_name PEER [IFACE]: while a host is connected to this handheld's
 # gadget, usb-netplay points at that host (unless a host-side link is newer)
 gadget_peer_name() {
-    local car ifc cur
+    local car ifc cur ms
     ifc=${2:-gadget}
     car=$(cat "$R/sys/class/net/$ifc/carrier" 2>/dev/null)
     cur=$(hosts_get "$NETPLAY_NAME")
+    # a notice when a host starts answering on the gadget, and when it goes;
+    # the ping, because some UDCs report a carrier with nothing plugged in
+    # (gadget-host.IF also lets lib/info.py answer that host)
+    if [ "$car" = 1 ] && [ ! -f "$STATE/gadget-host.$ifc" ] && ms=$(ping_ms "$1") && [ -n "$ms" ]; then
+        mkdir -p "$STATE" && echo "$1" > "$STATE/gadget-host.$ifc"
+        ui_notify "USB Netplay: cable link up, the other end is $1 ($ms ms)"
+    elif [ "$car" != 1 ] && [ -f "$STATE/gadget-host.$ifc" ]; then
+        rm -f "$STATE/gadget-host.$ifc"
+        ui_notify "USB Netplay: cable link down"
+    fi
     if [ "$car" = 1 ]; then
         ls "$STATE/links" 2>/dev/null | grep -q . && return 0
         [ "$cur" = "$1" ] || hosts_set "$NETPLAY_NAME" "$1"
@@ -214,16 +227,10 @@ ping_ms() {
 }
 
 cores_report() {
-    local d c f
-    for d in /tmp/cores /usr/lib/libretro /home/ark/.config/retroarch/cores /opt/muos/share/core; do
-        [ -d "$R$d" ] || continue
-        printf 'Cores in %s (netplay needs the same build on both handhelds):\n' "$d"
-        for c in nestopia fceumm snes9x gambatte mgba genesis_plus_gx genesisplusgx beetle_pce_fast pce_fast; do
-            f="$R$d/${c}_libretro.so"
-            [ -f "$f" ] && printf '  %-16s %s\n' "$c" "$(md5sum < "$f" | cut -c1-8)"
-        done
-        return 0
-    done
+    local d c s
+    d=$(core_dir) || return 0
+    printf 'Cores in %s (netplay needs the same build on both handhelds):\n' "$d"
+    core_md5s | while read -r c s; do printf '  %-16s %s\n' "$c" "$s"; done
 }
 
 cmd_status() {
@@ -248,6 +255,7 @@ cmd_status() {
         peer=$(sed -n 's/^peer=//p' "$f")
         ms=$(ping_ms "$peer")
         echo "  $(basename "$f"): the other handheld is $peer ($(sed -n 's/^how=//p' "$f")), ping ${ms:-no answer} ms"
+        peer_report "$peer"
         name=1
     done
     for f in "$STATE"/ignored.*; do
@@ -261,6 +269,7 @@ cmd_status() {
     if [ -n "$gif" ] && [ "$(cat "$R/sys/class/net/$gif/carrier" 2>/dev/null)" = 1 ]; then
         ms=$(ping_ms "$SUBNET.1")
         echo "  $gif (this handheld is the USB device): the other handheld is $SUBNET.1, ping ${ms:-no answer} ms"
+        [ -n "$ms" ] && peer_report "$SUBNET.1"
         name=1
     fi
     tunnel=$({ ps -eo args 2>/dev/null || ps -o args 2>/dev/null; } | grep -c "[a]db/tunnel.py")
@@ -283,14 +292,16 @@ cmd_status() {
 }
 
 cmd_watch() {
-    local tpid f i
+    local tpid ipid loops f i
+    loops=0
     caps_probe
     mkdir -p "$STATE"
     echo $$ > "$STATE/watch.pid"
     [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 262144 ] && : > "$LOG"
     log "watch: started ($FW_LABEL, device mode $DEV_MODE, host $HOST_OK)"
     # a fresh start forgets earlier attempts (tests run one loop at a time and keep them)
-    [ -n "$USBNP_WATCH_ONCE" ] || rm -rf "$STATE"/lock.* "$STATE"/tried.* "$STATE"/ignored.* 2>/dev/null
+    [ -n "$USBNP_WATCH_ONCE" ] || rm -rf "$STATE"/lock.* "$STATE"/tried.* "$STATE"/ignored.* "$STATE"/gadget-host.* 2>/dev/null
+    info_write
     trap 'WAKE=1' USR1
     while :; do
         apply_fallback
@@ -304,8 +315,10 @@ cmd_watch() {
                 # the interface came back under the same name (a quick replug
                 # or a USB reset of the other handheld) without our address
                 log "watch: $i lost its address, setting the link up again"
-                link_down "$i"
+                link_down "$i" quiet
+                LINK_QUIET=1
                 link_up_locked "$i"
+                LINK_QUIET=
             elif ping_ok "$(sed -n 's/^peer=//p' "$f")"; then
                 rm -f "$STATE/fails.$i"
             else
@@ -347,6 +360,16 @@ cmd_watch() {
                 tpid=$!
             fi
         fi
+        # this handheld's info for the other end of the cable (lib/info.py),
+        # refreshed every 5 minutes in case cores were copied
+        if [ -n "$PY" ] && [ -z "$USBNP_DRYRUN" ]; then
+            if [ -z "$ipid" ] || ! kill -0 "$ipid" 2>/dev/null; then
+                "$PY" -u "$HERE/lib/info.py" serve "$STATE/info" "$STATE" >> "$LOG" 2>&1 &
+                ipid=$!
+            fi
+        fi
+        loops=$((loops + 1))
+        [ $((loops % 60)) = 0 ] && info_write
         [ -n "$USBNP_WATCH_ONCE" ] && return 0
         # 5 s, or less when the udev rule pokes (USR1) about a USB link
         WAKE=
@@ -387,8 +410,14 @@ cmd_rebind_adb() {
 
 cmd_hosts_adb() {
     case "$1" in
-        up) [ "$(hosts_get "$NETPLAY_NAME")" = 127.0.0.1 ] || hosts_set "$NETPLAY_NAME" 127.0.0.1 ;;
-        down) [ "$(hosts_get "$NETPLAY_NAME")" = 127.0.0.1 ] && hosts_set "$NETPLAY_NAME" "$FALLBACK_HOST" ;;
+        up)
+            [ "$(hosts_get "$NETPLAY_NAME")" = 127.0.0.1 ] && return 0
+            hosts_set "$NETPLAY_NAME" 127.0.0.1
+            ui_notify "USB Netplay: cable link up (through ADB); join with Connect to Netplay Host" ;;
+        down)
+            [ "$(hosts_get "$NETPLAY_NAME")" = 127.0.0.1 ] || return 0
+            hosts_set "$NETPLAY_NAME" "$FALLBACK_HOST"
+            ui_notify "USB Netplay: cable link down" ;;
     esac
 }
 
@@ -426,5 +455,6 @@ case "$1" in
     hosts-adb) cmd_hosts_adb "$2" ;;
     detect) caps_probe; printf 'FW=%s\nBASE=%s\nDEV_MODE=%s\nHOST_OK=%s\nSUBNET=%s\nOWN_FUNC=%s\n' "$FW" "$BASE" "$DEV_MODE" "$HOST_OK" "$SUBNET" "$OWN_FUNC" ;;
     version) echo "$USBNP_VERSION" ;;
+    info) info_write; cat "$STATE/info" ;;
     *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

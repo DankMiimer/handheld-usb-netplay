@@ -13,6 +13,7 @@ handheld, or who want to add a firmware. The code is in `usb-netplay/`:
 | `lib/fw/*.sh` | one file per firmware: service, network manager, RetroArch settings |
 | `lib/ui.sh` | showing the report on the screen |
 | `lib/dhcp_probe.py` | asks the other handheld's DHCP server for an address |
+| `lib/info.sh`, `lib/info.py` | this handheld's info (cores, defaults) for the other end, and the comparison in the status |
 | `adb/tunnel.py`, `adb/helper.py` | the ADB tunnel for handhelds that can only be an ADB device |
 
 Everything runs as root under a plain POSIX shell (busybox ash, dash or bash).
@@ -202,7 +203,44 @@ its launcher doesn't overwrite the values:
 | muOS | its `retroarch.cfg` |
 
 Cores are never copied. The status screen lists md5 checksums of the common
-netplay cores so you can compare the two handhelds.
+netplay cores, and compares them with the other handheld (section 8a).
+
+## 8a. Comparing the two handhelds
+
+Each handheld writes `state/info`, a short `KEY=VALUE` text:
+- the USB Netplay version, firmware and device;
+- `core.NAME=MD5` for the common netplay cores, under one name per core
+  (KNULLI's `genesisplusgx` and `pce_fast` count as `genesis_plus_gx` and
+  `beetle_pce_fast`);
+- `default.SYSTEM=CORE`: the core the frontend starts a system's games
+  with. That's the user's choice (`nes.core=` in `system.cfg` or
+  `knulli.conf`), or else the `default="true"` core in `es_systems.cfg`.
+
+`lib/info.py serve` answers `usbnp-info?` on UDP port 55437 with that file,
+but only to the address at the other end of a cable link (`state/links/*`,
+or the host on this handheld's gadget). It never answers over Wi-Fi. The
+status asks the other handheld with `info.py ask` (1 s) and prints:
+- which cores are the same build, which differ, and which exist on one side
+  only;
+- each system whose default cores differ, because **Connect to Netplay Host**
+  keeps the core it started with.
+
+`usbnp info` prints this handheld's own info. The ADB tunnel doesn't carry
+the request yet.
+
+## 8b. Notices
+
+`ui_notify` posts a line to EmulationStation's local web API
+(`POST http://127.0.0.1:1234/notify`, on ROCKNIX, AmberELEC, KNULLI and
+Batocera) when:
+- a host-side link comes up or goes away;
+- a host starts or stops answering on this handheld's gadget. A ping is
+  needed first, because some USB device controllers report a carrier with
+  nothing plugged in;
+- the ADB tunnel comes up or goes down.
+
+Re-links after a lost address are quiet, and so is the ADB helper's 10 s
+refresh. `NOTIFY=no` in `settings.conf` turns notices off.
 
 ## 9. Undoing everything
 

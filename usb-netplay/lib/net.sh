@@ -156,6 +156,7 @@ link_up() {
     printf 'peer=%s\nme=%s\nhow=%s\nside=host\n' "$peer" "$me" "$how" > "$STATE/links/$IFACE"
     hosts_set "$NETPLAY_NAME" "$peer"
     log "link-up $IFACE: peer $peer ($how), this end $me"
+    [ -n "$LINK_QUIET" ] || ui_notify "USB Netplay: cable link up, the other end is $peer ($(ping_ms "$peer") ms)"
 }
 
 # netmgr_hides_usb: USB Netplay's setup told this firmware's network manager to
@@ -196,7 +197,8 @@ leave_alone() {
     log "link-up $1: $2; not a handheld, left alone$note"
 }
 
-# link_down IF: the interface went away
+# link_down IF [quiet]: the interface went away (quiet: no notice, because
+# the link is set up again straight away)
 link_down() {
     local f gone newest
     f="$STATE/links/$1"
@@ -204,6 +206,7 @@ link_down() {
     gone=$(sed -n 's/^peer=//p' "$f")
     rm -f "$f"
     log "link-down $1: peer $gone"
+    [ "$2" = quiet ] || ui_notify "USB Netplay: cable link down (the other end was $gone)"
     [ "$(hosts_get "$NETPLAY_NAME")" = "$gone" ] || return 0
     newest=$(ls -t "$STATE/links" 2>/dev/null | head -n 1)
     if [ -n "$newest" ]; then

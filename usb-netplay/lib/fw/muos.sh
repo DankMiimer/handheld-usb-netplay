@@ -24,7 +24,7 @@ EOF
     run_bg /bin/sh "$R$BASE/usbnp" watch
 }
 
-fw_service_remove() { run pkill -f "$BASE/usbnp watch"; }
+fw_service_remove() { run pkill -f "$BASE/usbnp watch"; run pkill -f "$BASE/lib/info.py"; }
 fw_netmgr() { :; }   # muOS only runs DHCP on wlan0
 
 fw_retroarch() { [ -f "$R$RACFG" ] && retroarch_keys "$RACFG"; }

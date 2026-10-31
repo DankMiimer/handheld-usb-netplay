@@ -169,9 +169,11 @@ has "serial: LAN search goes over the cable" "run: ip route replace 255.255.255.
 hasnt "never a default route" "default" "$dry"
 check "serial: usb-netplay points at the peer" $'10.170.5.2\tusb-netplay' "$(grep usb-netplay "$ROOT/run/rocknix/hosts")"
 check "hosts symlink kept (ROCKNIX)" /run/rocknix/hosts "$(readlink "$ROOT/etc/hosts")"
+has "serial: a notice in the menu" "run: notify USB Netplay: cable link up, the other end is 10.170.5.2" "$dry"
 has "status lists the link" "usb0: the other handheld is 10.170.5.2 (serial)" "$(u status)"
 u link-down usb0
 check "link-down clears usb-netplay" "" "$(grep usb-netplay "$ROOT/run/rocknix/hosts")"
+has "link-down: a notice in the menu" "run: notify USB Netplay: cable link down" "$(cat "$DRY")"
 w "$ROOT/sys/class/net/gadget/carrier" $'1\n'
 has "status names the host on this handheld's gadget" "gadget (this handheld is the USB device): the other handheld is $s1.1" "$(u status)"
 rm -rf "$ROOT/sys/class/net/gadget"
@@ -278,8 +280,56 @@ make_root knulli-h700 "$ROOT"
 u setup >/dev/null 2>&1
 u hosts-adb up
 check "tunnel up: usb-netplay is 127.0.0.1" $'127.0.0.1\tusb-netplay' "$(grep usb-netplay "$ROOT/etc/hosts")"
+has "tunnel up: a notice in the menu" "run: notify USB Netplay: cable link up (through ADB)" "$(cat "$DRY")"
+u hosts-adb up
+check "tunnel up again (the helper's 10 s refresh): no second notice" 0 "$(grep -c notify "$DRY")"
+printf 'NOTIFY=no\n' > "$ROOT/userdata/system/usb-netplay/settings.conf"
 u hosts-adb down
 check "tunnel down: usb-netplay cleared" "" "$(grep usb-netplay "$ROOT/etc/hosts")"
+check "NOTIFY=no: no notice" 0 "$(grep -c notify "$DRY")"
+
+echo "== info for the other handheld, and the comparison in the status"
+make_root knulli-h700 "$ROOT"
+u setup >/dev/null 2>&1
+kinfo=$(u info)
+has "info: firmware" "firmware=KNULLI 2024.11" "$kinfo"
+has "info: core checksum" "core.nestopia=$(printf 'nestopia 1.54' | md5sum | cut -c1-8)" "$kinfo"
+has "info: KNULLI's genesisplusgx under its common name" "core.genesis_plus_gx=" "$kinfo"
+has "info: default core from es_systems.cfg" "default.nes=fceumm" "$kinfo"
+has "info: default core of another system" "default.snes=snes9x" "$kinfo"
+cp "$ROOT/userdata/system/usb-netplay/state/info" "$WORK/knulli-info"
+printf 'nes.core=nestopia\n' >> "$ROOT/userdata/system/knulli.conf"
+has "info: the user's core choice wins" "default.nes=nestopia" "$(u info)"
+
+make_root rocknix-nm "$ROOT"
+u setup >/dev/null 2>&1
+has "info: ROCKNIX default core" "default.nes=nestopia" "$(u info)"
+usb_netdev "$ROOT" usb0 cdc_ncm "usbnp-10.170.5.2"
+u link-up usb0
+st=$(USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_FAKE_PEER_INFO=$WORK/knulli-info $SH "$USBNP" status)
+has "compare: names the other handheld" "It is " "$st"
+has "compare: same build" "Same core builds on both: nestopia" "$st"
+has "compare: different build" "DIFFERENT builds (netplay may refuse or desync): fceumm" "$st"
+has "compare: default core mismatch" "nes games start with nestopia here, fceumm there" "$st"
+st=$(USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_FAKE_PEER_INFO=$WORK/nothing $SH "$USBNP" status)
+has "compare: an old USB Netplay or no handheld" "doesn't answer USB Netplay's info request" "$st"
+u link-down usb0
+
+echo "== device side: notices when a host starts and stops answering on the gadget"
+make_root rocknix-nm "$ROOT"
+u setup >/dev/null 2>&1
+mkdir -p "$ROOT/sys/class/net/gadget" "$ROOT/var/run"
+w "$ROOT/sys/class/udc/fcc00000.usb/function" $'cdc\n'
+w "$ROOT/sys/class/net/gadget/carrier" $'1\n'
+: > "$DRY"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null
+has "gadget: a notice when a host answers" "run: notify USB Netplay: cable link up, the other end is $s1.1" "$(cat "$DRY")"
+: > "$DRY"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null
+check "gadget: no repeat while it stays up" 0 "$(grep -c notify "$DRY")"
+w "$ROOT/sys/class/net/gadget/carrier" $'0\n'
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null
+has "gadget: a notice when it goes" "run: notify USB Netplay: cable link down" "$(cat "$DRY")"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

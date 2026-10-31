@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(SRC, 'adb'))
 os.environ.update(USBNP_NETPLAY_PORT='57435', USBNP_HELPER_PORT='57439', USBNP_JOIN_PORT='56435')
 
 import dhcp_probe   # noqa: E402
+import info         # noqa: E402
 import tunnel       # noqa: E402
 
 A_CNXN, A_OPEN, A_OKAY, A_CLSE, A_WRTE, A_AUTH = (
@@ -79,6 +80,41 @@ class DhcpProbeTest(unittest.TestCase):
         self.assertIsNone(dhcp_probe.parse_offer(self.offer(7), 8))          # another transaction
         self.assertIsNone(dhcp_probe.parse_offer(self.offer(7, kind=5), 7))  # an ACK, not an offer
         self.assertIsNone(dhcp_probe.parse_offer(b'\0' * 100, 7))
+
+
+class InfoTest(unittest.TestCase):
+    """lib/info.py: answers the other end of a cable link, nobody else."""
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        os.mkdir(os.path.join(self.state, 'links'))
+        with open(os.path.join(self.state, 'links', 'usb0'), 'w') as f:
+            f.write('peer=10.170.0.5\nme=10.170.0.6\nhow=static\nside=host\n')
+        with open(os.path.join(self.state, 'gadget-host.gadget'), 'w') as f:
+            f.write('10.177.8.1\n')
+        self.info = os.path.join(self.state, 'info')
+        with open(self.info, 'w') as f:
+            f.write('usbnp=0.1.3\nfirmware=ROCKNIX 20261001\ncore.nestopia=6381df7a\n')
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(('127.0.0.1', 0))
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=info.serve, args=(self.info, self.state, self.sock), daemon=True).start()
+
+    def test_cable_peers(self):
+        self.assertEqual(info.cable_peers(self.state), {'127.0.0.1', '10.170.0.5', '10.177.8.1'})
+
+    def test_answers_a_cable_peer(self):
+        self.assertIn('core.nestopia=6381df7a', info.ask('127.0.0.1', 1, self.port))
+
+    def test_ignores_others(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(('127.0.0.2', 0))   # still loopback, but not a cable peer
+        s.settimeout(0.5)
+        s.sendto(info.QUERY, ('127.0.0.1', self.port))
+        with self.assertRaises(socket.timeout):
+            s.recvfrom(8192)
+        s.sendto(b'something else', ('127.0.0.1', self.port))
+        self.assertIn('usbnp=', info.ask('127.0.0.1', 1, self.port))   # still serving
 
 
 class FakeAdbd(threading.Thread):

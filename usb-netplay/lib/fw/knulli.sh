@@ -29,6 +29,7 @@ case "\$1" in
     [ -f "\$PID" ] && kill "\$(cat "\$PID")" 2>/dev/null
     rm -f "\$PID"
     pkill -f "$BASE/adb/tunnel.py" 2>/dev/null
+    pkill -f "$BASE/lib/info.py" 2>/dev/null
     ;;
 esac
 exit 0
