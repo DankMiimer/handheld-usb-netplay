@@ -14,7 +14,7 @@
 # shellcheck shell=sh
 # shellcheck disable=SC3043   # local: busybox ash, dash and bash all have it
 
-USBNP_VERSION=0.1.3
+USBNP_VERSION=0.2.0
 HERE=$(cd "$(dirname "$0")" && pwd)
 export USBNP_HERE="$HERE"
 
@@ -28,6 +28,8 @@ export USBNP_HERE="$HERE"
 . "$HERE/lib/net.sh"
 # shellcheck source=lib/info.sh
 . "$HERE/lib/info.sh"
+# shellcheck source=lib/gblink.sh
+. "$HERE/lib/gblink.sh"
 # shellcheck source=lib/ui.sh
 . "$HERE/lib/ui.sh"
 
@@ -45,6 +47,7 @@ LOG="$R$BASE/usbnp.log"
 SUBNET=$(subnet_of_id "$(device_id)")
 FALLBACK_HOST=$(get_key "$BASE/settings.conf" FALLBACK_HOST)
 NOTIFY=$(get_key "$BASE/settings.conf" NOTIFY)
+GBLINK=$(get_key "$BASE/settings.conf" GBLINK)
 PY=$(command -v python3 2>/dev/null)
 [ -f "$HERE/lib/fw/$FW.sh" ] && . "$HERE/lib/fw/$FW.sh"
 
@@ -131,7 +134,7 @@ gadget_peer_name() {
         mkdir -p "$STATE" && echo "$1" > "$STATE/gadget-host.$ifc"
         ui_notify "USB Netplay: cable link up, the other end is $1 ($ms ms)"
     elif [ "$car" != 1 ] && [ -f "$STATE/gadget-host.$ifc" ]; then
-        rm -f "$STATE/gadget-host.$ifc"
+        rm -f "$STATE/gadget-host.$ifc" "$STATE/peer-info.$ifc" "$STATE/asked.$ifc"
         ui_notify "USB Netplay: cable link down"
     fi
     if [ "$car" = 1 ]; then
@@ -171,6 +174,7 @@ cmd_setup() {
         return 1
     fi
     install_runtime
+    conf_lock
     LOG="$R$BASE/usbnp.log"
     mkdir -p "$STATE"
     udev_rules_install
@@ -186,7 +190,11 @@ cmd_setup() {
         is_usb_net "$i" && [ ! -f "$STATE/links/$i" ] && [ ! -f "$STATE/ignored.$i" ] && link_up_locked "$i"
     done
     FALLBACK_HOST=$(get_key "$BASE/settings.conf" FALLBACK_HOST)
+    GBLINK=$(get_key "$BASE/settings.conf" GBLINK)
     apply_fallback
+    gblink_update
+    rw_done
+    conf_unlock
     log "setup done ($FW_LABEL, $DEV_MODE, host $HOST_OK)"
     return 0
 }
@@ -195,7 +203,9 @@ cmd_remove() {
     fw_service_remove
     own_gadget_down
     [ "$(hosts_get "$NETPLAY_NAME")" ] && hosts_set "$NETPLAY_NAME" ""
+    conf_lock
     undo_all
+    conf_unlock
     run udevadm control --reload
     [ -n "$UNIT_DIR" ] && run systemctl daemon-reload
     rm -rf "$STATE/links"
@@ -269,11 +279,26 @@ cmd_status() {
     if [ -n "$gif" ] && [ "$(cat "$R/sys/class/net/$gif/carrier" 2>/dev/null)" = 1 ]; then
         ms=$(ping_ms "$SUBNET.1")
         echo "  $gif (this handheld is the USB device): the other handheld is $SUBNET.1, ping ${ms:-no answer} ms"
-        [ -n "$ms" ] && peer_report "$SUBNET.1"
+        if [ -s "$STATE/peer-info.$gif" ]; then
+            peer_report "$SUBNET.1" "$STATE/peer-info.$gif"
+        elif [ -n "$ms" ]; then
+            peer_report "$SUBNET.1"
+        fi
         name=1
     fi
     tunnel=$({ ps -eo args 2>/dev/null || ps -o args 2>/dev/null; } | grep -c "[a]db/tunnel.py")
-    [ "${tunnel:-0}" -gt 0 ] && echo "  ADB tunnel: waiting for or serving an ADB-only handheld"
+    if [ -f "$STATE/adb-device-info" ]; then
+        echo "  ADB tunnel: linked to the handheld on the host port"
+        peer_report adb "$STATE/adb-device-info"
+        name=1
+    elif [ "${tunnel:-0}" -gt 0 ]; then
+        echo "  ADB tunnel: waiting for an ADB-only handheld on the host port"
+    fi
+    if [ -f "$STATE/adb-up" ]; then
+        echo "  ADB (this handheld is the USB device): linked through the other handheld's tunnel"
+        [ -f "$STATE/adb-host-info" ] && peer_report adb "$STATE/adb-host-info"
+        name=1
+    fi
     [ "$name" = 1 ] || echo "  none (plug the other handheld in; the OTG adapter goes on the host)"
     name=$(hosts_get "$NETPLAY_NAME")
     if [ -z "$name" ]; then
@@ -288,6 +313,7 @@ cmd_status() {
     [ -n "$NEEDS_REBOOT" ] && echo "Restart this handheld once to finish the setup."
     echo "To play: host the game on one handheld, then on the other choose"
     echo "Netplay > Connect to Netplay Host (or Refresh Netplay Host List)."
+    gblink_report
     cores_report
 }
 
@@ -300,12 +326,14 @@ cmd_watch() {
     [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 262144 ] && : > "$LOG"
     log "watch: started ($FW_LABEL, device mode $DEV_MODE, host $HOST_OK)"
     # a fresh start forgets earlier attempts (tests run one loop at a time and keep them)
-    [ -n "$USBNP_WATCH_ONCE" ] || rm -rf "$STATE"/lock.* "$STATE"/tried.* "$STATE"/ignored.* "$STATE"/gadget-host.* 2>/dev/null
+    [ -n "$USBNP_WATCH_ONCE" ] || rm -rf "$STATE"/lock.* "$STATE"/tried.* "$STATE"/ignored.* "$STATE"/gadget-host.* \
+        "$STATE"/peer-info.* "$STATE"/asked.* "$STATE"/adb-up "$STATE"/adb-device-info 2>/dev/null
     info_write
     trap 'WAKE=1' USR1
     while :; do
         apply_fallback
         fw_watch_tick
+        gadget_info_refresh
         for f in "$STATE"/links/*; do
             [ -f "$f" ] || continue
             i=$(basename "$f")
@@ -356,7 +384,7 @@ cmd_watch() {
         done
         if [ -n "$PY" ] && [ "$HOST_OK" = 1 ] && [ -z "$USBNP_DRYRUN" ]; then
             if [ -z "$tpid" ] || ! kill -0 "$tpid" 2>/dev/null; then
-                "$PY" -u "$HERE/adb/tunnel.py" >> "$LOG" 2>&1 &
+                USBNP_STATE="$STATE" "$PY" -u "$HERE/adb/tunnel.py" >> "$LOG" 2>&1 &
                 tpid=$!
             fi
         fi
@@ -370,6 +398,8 @@ cmd_watch() {
         fi
         loops=$((loops + 1))
         [ $((loops % 60)) = 0 ] && info_write
+        gblink_update
+        [ "$HOST_OK" = 1 ] && host_port_check
         [ -n "$USBNP_WATCH_ONCE" ] && return 0
         # 5 s, or less when the udev rule pokes (USR1) about a USB link
         WAKE=
@@ -411,10 +441,14 @@ cmd_rebind_adb() {
 cmd_hosts_adb() {
     case "$1" in
         up)
+            mkdir -p "$STATE" && touch "$STATE/adb-up"
+            gblink_update
             [ "$(hosts_get "$NETPLAY_NAME")" = 127.0.0.1 ] && return 0
             hosts_set "$NETPLAY_NAME" 127.0.0.1
             ui_notify "USB Netplay: cable link up (through ADB); join with Connect to Netplay Host" ;;
         down)
+            rm -f "$STATE/adb-up"
+            gblink_update
             [ "$(hosts_get "$NETPLAY_NAME")" = 127.0.0.1 ] || return 0
             hosts_set "$NETPLAY_NAME" "$FALLBACK_HOST"
             ui_notify "USB Netplay: cable link down" ;;

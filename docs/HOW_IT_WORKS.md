@@ -14,6 +14,7 @@ handheld, or who want to add a firmware. The code is in `usb-netplay/`:
 | `lib/ui.sh` | showing the report on the screen |
 | `lib/dhcp_probe.py` | asks the other handheld's DHCP server for an address |
 | `lib/info.sh`, `lib/info.py` | this handheld's info (cores, defaults) for the other end, and the comparison in the status |
+| `lib/gblink.sh` | the Game Boy link cable: Gambatte's link mode from the cable's roles |
 | `adb/tunnel.py`, `adb/helper.py` | the ADB tunnel for handhelds that can only be an ADB device |
 
 Everything runs as root under a plain POSIX shell (busybox ash, dash or bash).
@@ -78,6 +79,8 @@ When a USB network interface appears, `link_up` tries these in order:
    app), `169.254.170.2` (ROCKNIX default) and `10.1.1.2` (JELOS). Each is
    tried with a ping, but only on devices with a handheld gadget's USB ID
    (`1d6b:0104`, the Nano's `8087:011e`, the kernel's `0525:a4a1`/`a4a2`).
+   The Nano never hands out an address, so for its ID this step comes before
+   the DHCP probe.
 
 "Left alone" means no address, route or hosts entry is set. The status lists
 the interface as "not a handheld". On firmwares where USB Netplay told the
@@ -158,7 +161,15 @@ running, so the tunnel comes back after a replug.
   - keeps ROCKNIX's gadget up with its address and DHCP server, because
     ROCKNIX's boot sometimes leaves it down;
   - keeps its own gadget bound;
-  - runs the ADB tunnel.
+  - runs the ADB tunnel;
+  - resets a host port that gave up on a device. After "unable to enumerate
+    USB device" a port can stay in the `default` state and ignore the
+    device even after it starts over, which happened with an RG Nano on an
+    RG DS. When that lasts 15 s, the controller's driver is unbound and bound
+    again, which cuts and restores the port's power. Only for plain host
+    controllers (EHCI, OHCI, xHCI, never a dual-role one that may carry the
+    gadget), only when nothing else is plugged into that controller, and at
+    most once in 2 minutes.
 - **The service** depends on the firmware:
 
   | Firmware | Service |
@@ -225,10 +236,47 @@ status asks the other handheld with `info.py ask` (1 s) and prints:
 - each system whose default cores differ, because **Connect to Netplay Host**
   keeps the core it started with.
 
-`usbnp info` prints this handheld's own info. The ADB tunnel doesn't carry
-the request yet.
+`usbnp info` prints this handheld's own info. Over the ADB tunnel there is no
+IP link to ask over, so the info goes the other way round:
+- the tunnel reads the other handheld's `state/info` through ADB's
+  `shell:` service, into `state/adb-device-info`;
+- it sends its own info to the helper on the control connection
+  (`INFO n` and n bytes), which saves it as `state/adb-host-info`.
 
-## 8b. Notices
+The status compares with those files on both ends.
+
+## 8b. The Game Boy link cable
+
+Gambatte has a network Game Link: one side is the server, the other connects
+to it by address, entered as 12 digits (`010170000006`). `lib/gblink.sh`
+picks the roles from the links right now:
+- a host-side link means **server**;
+- otherwise a host answering on this handheld's gadget means **client** of
+  that host (`.1` of this handheld's subnet);
+- otherwise an ADB tunnel that is up means **client** of `127.0.0.1`. The
+  helper also listens on `127.0.0.1:56400`, and the tunnel connects that to
+  the link server on its end (`PORTS gblink` / `OPEN n gblink`).
+
+It sets the options only when the role changes. A handheld that never linked
+keeps its own settings, and an unplugged one goes back to "Not Connected".
+
+Where the options go:
+- **ROCKNIX:** RetroArch folder options `config/Gambatte/gb.opt` and
+  `gbc.opt`. ROCKNIX's `setsettings` overwrites `Gambatte.opt` at every
+  launch: its test `[ ! -f "GAMBATTECONF" ]` lacks a `$`. A new folder file
+  also gets the one line ROCKNIX writes there, `gambatte_gbc_color_correction`.
+- **KNULLI and Batocera:** `global.retroarchcore.gambatte_*` keys in the
+  `.conf`.
+
+Gambatte's link (`libgambatte/libretro/net_serial.cpp`) has two quirks that
+explain the start order in the README:
+- The side that starts a transfer blocks its emulator until the other side
+  answers, and the other side only answers while its game waits on the link
+  port.
+- The server looks for its client at most once per 5 s of process CPU time
+  (`clock()`), which is about 30 s of real time on a handheld.
+
+## 8c. Notices
 
 `ui_notify` posts a line to EmulationStation's local web API
 (`POST http://127.0.0.1:1234/notify`, on ROCKNIX, AmberELEC, KNULLI and

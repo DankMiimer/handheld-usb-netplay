@@ -7,6 +7,8 @@ cd "$(dirname "$0")" || exit 1
 TESTS=$PWD
 USBNP=$(cd ../usb-netplay && pwd)/usbnp
 SH=${USBNP_TEST_SHELL:-dash}
+# the Game Boy link turns off at once in the tests (one check sets 30 s)
+export USBNP_GBLINK_OFF_DELAY=0
 # shellcheck source=fixtures.sh
 . ./fixtures.sh
 
@@ -131,7 +133,10 @@ bc=$(cat "$ROOT/boot/boot-custom.sh")
 has "knulli: connman blacklist at boot" 'NetworkInterfaceBlacklist=' "$bc"
 has "knulli: the user's boot step kept" "echo my own boot step" "$bc"
 has "knulli: service script runs watch" "/userdata/system/usb-netplay/usbnp watch" "$(cat "$ROOT/userdata/system/services/usb_netplay")"
-u setup >/dev/null 2>&1
+chmod a-w "$ROOT/boot/boot-custom.sh" "$ROOT/boot"   # KNULLI mounts /boot read-only
+again=$(u setup 2>&1)
+chmod u+w "$ROOT/boot" "$ROOT/boot/boot-custom.sh"
+hasnt "knulli: setup again doesn't write /boot when the block is unchanged" "boot-custom" "$again"
 check "knulli: setup twice adds one block" 1 "$(grep -c '^# >>> usb-netplay' "$ROOT/boot/boot-custom.sh")"
 check "knulli: setup twice lists the service once" "system.services=ssh samba usb_netplay" "$(grep '^system.services=' "$ROOT/userdata/system/knulli.conf")"
 
@@ -197,6 +202,13 @@ has "static: the RG Nano's USB Link address is tried first" "run: ip route repla
 check "static: usb-netplay points at it" $'10.170.0.5\tusb-netplay' "$(grep usb-netplay "$ROOT/etc/hosts")"
 u link-down usb0
 check "unplugged: usb-netplay falls back to FALLBACK_HOST" $'192.0.2.40\tusb-netplay' "$(grep usb-netplay "$ROOT/etc/hosts")"
+
+make_root rocknix-nm "$ROOT"
+u setup >/dev/null 2>&1
+usb_netdev "$ROOT" usb0 cdc_ncm "12c0000000000000" 8087:011e
+: > "$DRY"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_FAKE_DHCP="10.171.9.1 255.255.255.0 10.171.9.2 -" $SH "$USBNP" link-up usb0
+check "RG Nano: static address first, no DHCP probe" "peer=10.170.0.5 how=static" "$(sed -n 's/^\(peer\|how\)=/&/p' "$ROOT/storage/.config/usb-netplay/state/links/usb0" | tr '\n' ' ' | sed 's/ $//')"
 
 make_root rocknix-nm "$ROOT"
 mkdir -p "$ROOT/sys/class/net/wlan0"
@@ -275,6 +287,33 @@ check "late: tried again after 10 s" "peer=10.170.0.5" "$(grep peer= "$LINKS/usb
 for n in 1 2 3 4 5 6; do watch_once ""; done
 check "late: a linked interface isn't retried" 0 "$(ls "$ROOT/storage/.config/usb-netplay/state" | grep -c '^tried\.')"
 
+echo "== watch: a host port stuck after a failed connection gets its controller reset"
+# stuck_port DIR DRIVER: an EHCI-like controller whose port 1 is in "default" with no device
+stuck_port() {
+    local hc="$1/sys/devices/platform/fd800000.usb"
+    mkdir -p "$hc/usb3/3-0:1.0/usb3-port1" "$1/sys/bus/platform/drivers/$2"
+    w "$hc/usb3/3-0:1.0/usb3-port1/state" $'default\n'
+    ln -sfn "../../../bus/platform/drivers/$2" "$hc/driver"
+    ln -sfn "../../../devices/platform/fd800000.usb/usb3" "$1/sys/bus/usb/devices/usb3"
+}
+make_root rocknix-nm "$ROOT"
+u setup >/dev/null 2>&1
+stuck_port "$ROOT" ehci-platform
+: > "$DRY"
+for n in 1 2; do USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null; done
+hasnt "stuck port: not reset after 10 s" "unbind" "$(cat "$DRY")"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null
+has "stuck port: controller reset after 15 s" "fd800000.usb > $ROOT/sys/bus/platform/drivers/ehci-platform/unbind" "$(cat "$DRY")"
+: > "$DRY"
+for n in 1 2 3; do USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null; done
+hasnt "stuck port: at most once in 2 minutes" "unbind" "$(cat "$DRY")"
+make_root rocknix-nm "$ROOT"
+u setup >/dev/null 2>&1
+stuck_port "$ROOT" dwc2
+: > "$DRY"
+for n in 1 2 3 4; do USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null; done
+hasnt "stuck port: a dual-role controller (it may carry the gadget) is never reset" "unbind" "$(cat "$DRY")"
+
 echo "== hosts-adb (the ADB helper)"
 make_root knulli-h700 "$ROOT"
 u setup >/dev/null 2>&1
@@ -314,6 +353,96 @@ has "compare: default core mismatch" "nes games start with nestopia here, fceumm
 st=$(USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_FAKE_PEER_INFO=$WORK/nothing $SH "$USBNP" status)
 has "compare: an old USB Netplay or no handheld" "doesn't answer USB Netplay's info request" "$st"
 u link-down usb0
+cp "$WORK/knulli-info" "$ROOT/storage/.config/usb-netplay/state/adb-device-info"
+st=$(u status)
+has "compare over ADB (host side): the tunnel's handheld" "ADB tunnel: linked to the handheld on the host port" "$st"
+has "compare over ADB (host side): different build" "DIFFERENT builds (netplay may refuse or desync): fceumm" "$st"
+sed 's/$/\r/' "$WORK/knulli-info" > "$ROOT/storage/.config/usb-netplay/state/adb-device-info"
+st=$(u status)
+has "compare: \\r\\n line ends (an old adbd's shell) still compare" "Same core builds on both: nestopia" "$st"
+hasnt "compare: \\r\\n line ends make no false default-core mismatch" "snes games start" "$st"
+
+echo "== Game Boy link cable (Gambatte), roles from the cable"
+make_root rocknix-nm "$ROOT"
+before=$(snapshot "$ROOT" | grep -v '^\./sys/')
+u setup >/dev/null 2>&1
+GBO=$ROOT/storage/.config/retroarch/config/Gambatte
+[ ! -e "$GBO/gb.opt" ] && PASS=$((PASS + 1)) || { FAIL=$((FAIL + 1)); echo "FAIL gblink: setup without a link touched Gambatte"; }
+usb_netdev "$ROOT" usb0 cdc_ncm "usbnp-10.170.5.2"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null
+has "gblink: the USB host is the server (gb)" 'gambatte_gb_link_mode = "Network Server"' "$(cat "$GBO/gb.opt" 2>/dev/null)"
+has "gblink: the USB host is the server (gbc)" 'gambatte_gb_link_mode = "Network Server"' "$(cat "$GBO/gbc.opt" 2>/dev/null)"
+has "gblink: port" 'gambatte_gb_link_network_port = "56400"' "$(cat "$GBO/gb.opt" 2>/dev/null)"
+has "gblink: ROCKNIX's own Gambatte setting kept in the folder file" 'gambatte_gbc_color_correction = "disabled"' "$(cat "$GBO/gb.opt" 2>/dev/null)"
+has "gblink: status explains the start order" "this handheld is the link server" "$(u status)"
+rm -f "$ROOT/sys/class/net/usb0"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null
+has "gblink: unplugged, back to Not Connected" 'gambatte_gb_link_mode = "Not Connected"' "$(cat "$GBO/gb.opt" 2>/dev/null)"
+u remove >/dev/null 2>&1
+check "gblink: remove restores the tree (apart from the fake USB device)" "$before" "$(snapshot "$ROOT" | grep -v '^\./sys/')"
+
+make_root rocknix-nm "$ROOT"
+u setup >/dev/null 2>&1
+s1=$(field SUBNET "$(u detect)")
+mkdir -p "$ROOT/sys/class/net/gadget" "$ROOT/var/run"
+w "$ROOT/sys/class/udc/fcc00000.usb/function" $'cdc\n'
+w "$ROOT/sys/class/net/gadget/carrier" $'1\n'
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 USBNP_FAKE_PEER_INFO=$WORK/nothing $SH "$USBNP" watch </dev/null
+[ ! -e "$GBO/gb.opt" ] && PASS=$((PASS + 1)) || { FAIL=$((FAIL + 1)); echo "FAIL gblink: a PC on the gadget (no USB Netplay info) made this a client"; }
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 USBNP_FAKE_PEER_INFO=$WORK/knulli-info $SH "$USBNP" watch </dev/null
+gb=$(cat "$GBO/gb.opt" 2>/dev/null)
+has "gblink: the USB device of a USB Netplay handheld is the client" 'gambatte_gb_link_mode = "Network Client"' "$gb"
+digits=$(printf '%03d%03d%03d%03d' $(echo "$s1.1" | tr . ' '))
+check "gblink: the client's server address is the host (.1)" "$digits" "$(for n in 1 2 3 4 5 6 7 8 9 10 11 12; do printf '%s' "$gb" | sed -n "s/^gambatte_gb_link_network_server_ip_$n = \"\(.\)\"/\1/p"; done | tr -d '\n')"
+
+make_root rocknix-nm "$ROOT"
+u setup >/dev/null 2>&1
+cp "$WORK/knulli-info" "$ROOT/storage/.config/usb-netplay/state/adb-device-info"
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_WATCH_ONCE=1 $SH "$USBNP" watch </dev/null
+has "gblink: the ADB tunnel's host is the server" 'gambatte_gb_link_mode = "Network Server"' "$(cat "$GBO/gb.opt" 2>/dev/null)"
+
+make_root knulli-h700 "$ROOT"
+u setup >/dev/null 2>&1
+u hosts-adb up
+kc=$(cat "$ROOT/userdata/system/knulli.conf")
+has "gblink KNULLI: through ADB the client connects to 127.0.0.1" "global.retroarchcore.gambatte_gb_link_mode=Network Client" "$kc"
+has "gblink KNULLI: address digits" "global.retroarchcore.gambatte_gb_link_network_server_ip_3=7" "$kc"
+has "gblink KNULLI: last digit" "global.retroarchcore.gambatte_gb_link_network_server_ip_12=1" "$kc"
+u hosts-adb down
+has "gblink KNULLI: tunnel down, Not Connected" "global.retroarchcore.gambatte_gb_link_mode=Not Connected" "$(cat "$ROOT/userdata/system/knulli.conf")"
+
+make_root knulli-h700 "$ROOT"
+u setup >/dev/null 2>&1
+u hosts-adb up
+USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY USBNP_GBLINK_OFF_DELAY=30 $SH "$USBNP" hosts-adb down
+has "gblink KNULLI: a short ADB drop (a game starting) keeps the client role" \
+    "global.retroarchcore.gambatte_gb_link_mode=Network Client" "$(cat "$ROOT/userdata/system/knulli.conf")"
+
+echo "== settings files survive USB Netplay processes running at once"
+make_root knulli-h700 "$ROOT"
+orig=$(cat "$ROOT/userdata/system/knulli.conf")
+u setup >/dev/null 2>&1 &
+for n in 1 2 3 4; do
+    USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY.$n $SH "$USBNP" hosts-adb up &
+    USBNP_ROOT=$ROOT USBNP_DRYRUN=$DRY.$n $SH "$USBNP" hosts-adb down &
+done
+wait
+kc=$(cat "$ROOT/userdata/system/knulli.conf")
+printf '%s\n' "$orig" | while IFS= read -r line; do
+    case "$line" in system.services=*) continue ;; esac   # setup adds usb_netplay there
+    printf '%s\n' "$kc" | grep -q -x -F -e "$line" || echo "LOST: $line"
+done > "$WORK/lost"
+check "parallel setup + ADB helper calls: no line of knulli.conf lost" "" "$(cat "$WORK/lost")"
+has "parallel: setup's own change is there" "system.services=ssh samba usb_netplay" "$kc"
+check "parallel: no temporary files left" "" "$(ls "$ROOT/userdata/system" | grep usbnp)"
+rm -f "$DRY".?
+
+make_root knulli-h700 "$ROOT"
+u setup >/dev/null 2>&1
+printf 'GBLINK=no\n' > "$ROOT/userdata/system/usb-netplay/settings.conf"
+u hosts-adb up
+hasnt "gblink: GBLINK=no leaves Gambatte alone" "gambatte_gb_link" "$(cat "$ROOT/userdata/system/knulli.conf")"
+has "gblink: GBLINK=no in the status" "left alone (GBLINK=no)" "$(u status)"
 
 echo "== device side: notices when a host starts and stops answering on the gadget"
 make_root rocknix-nm "$ROOT"

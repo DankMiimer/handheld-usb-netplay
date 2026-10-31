@@ -141,26 +141,145 @@ set_key() {
     replace_key_line "$R$f" "$re" "$new"
 }
 
-# replace_key_line FILE KEYREGEX NEWLINE: first match replaced, other matches
-# dropped, appended when missing; NEWLINE empty means delete the key
+# set_keys PATH STYLE KEY VALUE [KEY VALUE...]: several keys in one write
+set_keys() {
+    local f st old re
+    f=$1 st=$2
+    shift 2
+    [ -f "$R$f" ] || { mkdir -p "$(dirname "$R$f")"; : > "$R$f"; }
+    while [ $# -ge 2 ]; do
+        re=$(key_regex "$1")
+        if ! manifest_prefix_has "key${TAB}$f${TAB}$1${TAB}"; then
+            old=$(grep -m 1 "^${re}[[:space:]]*=" "$R$f" 2>/dev/null)
+            if [ -n "$old" ]; then
+                manifest_add "key${TAB}$f${TAB}$1${TAB}$st${TAB}saved${TAB}$old"
+            else
+                manifest_add "key${TAB}$f${TAB}$1${TAB}$st${TAB}absent${TAB}"
+            fi
+        fi
+        printf '%s\t%s\n' "$re" "$(key_line "$1" "$2" "$st")"
+        shift 2
+    done | replace_key_lines "$R$f"
+}
+
+# conf_lock / conf_unlock: one USB Netplay process at a time changes settings
+# files (setup, remove, the watch loop, the ADB helper's calls). Two writers
+# at once once emptied a KNULLI knulli.conf.
+conf_lock() {
+    local l p n
+    [ -n "$CONF_LOCKED" ] && return 0
+    mkdir -p "$STATE"
+    l="$STATE/lock.conf"
+    n=0
+    while ! mkdir "$l" 2>/dev/null; do
+        p=$(cat "$l/pid" 2>/dev/null)
+        if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; then
+            rm -rf "$l"   # held by a process that's gone
+            continue
+        fi
+        n=$((n + 1))
+        [ $n -ge 100 ] && { log "conf_lock: still held by $p after 20 s"; return 1; }
+        sleep 0.2 2>/dev/null || sleep 1
+    done
+    echo $$ > "$l/pid"
+    CONF_LOCKED=1
+}
+conf_unlock() {
+    [ -n "$CONF_LOCKED" ] || return 0
+    rm -rf "$STATE/lock.conf"
+    CONF_LOCKED=
+}
+
+# write_over FILE TMP: put TMP in FILE's place in one step (rename), so no
+# reader ever sees half a file; TMP was made with FILE's mode. Refuses to
+# empty FILE or to shrink it below half its lines: USB Netplay never removes
+# that much, so it would mean FILE was being written by someone else.
+write_over() {
+    local a b
+    a=$(wc -l < "$1" 2>/dev/null || echo 0)
+    b=$(wc -l < "$2" 2>/dev/null || echo 0)
+    if { [ -s "$1" ] && [ ! -s "$2" ]; } || { [ "$a" -gt 10 ] && [ $((b * 2)) -lt "$a" ]; }; then
+        rm -f "$2"
+        log "write_over: refused to shrink $1 from $a to $b lines"
+        return 1
+    fi
+    if [ -L "$1" ]; then
+        cat "$2" > "$1" && rm -f "$2"   # keep the link
+    else
+        mv -f "$2" "$1"
+    fi
+}
+
+# replace_key_lines FILE: apply "KEYREGEX<TAB>NEWLINE" pairs from stdin to
+# FILE in one pass. Per key: the first match replaced, other matches dropped,
+# appended when missing; NEWLINE empty means delete the key
+replace_key_lines() {
+    local tmp
+    tmp="$1.usbnp.$$"
+    cp -p "$1" "$tmp" 2>/dev/null || : > "$tmp"
+    # the pairs through a file, not awk -v: awk would turn the \. in a pattern
+    # (and any backslash in a value) into something else
+    cat > "$tmp.keys"
+    USBNP_KEYS="$tmp.keys" awk '
+        BEGIN {
+            FS = "\t"
+            while ((getline line < ENVIRON["USBNP_KEYS"]) > 0) {
+                n++; i = index(line, "\t")
+                re[n] = "^" substr(line, 1, i - 1) "[[:space:]]*="; nl[n] = substr(line, i + 1)
+            }
+            FS = " "
+        }
+        {
+            for (k = 1; k <= n; k++) if ($0 ~ re[k]) {
+                if (!done[k] && nl[k] != "") print nl[k]
+                done[k] = 1; next
+            }
+            print
+        }
+        END { for (k = 1; k <= n; k++) if (!done[k] && nl[k] != "") print nl[k] }
+    ' "$1" > "$tmp" || { rm -f "$tmp" "$tmp.keys"; return 1; }
+    rm -f "$tmp.keys"
+    write_over "$1" "$tmp"
+}
+
+# replace_key_line FILE KEYREGEX NEWLINE: one key (see replace_key_lines)
 replace_key_line() {
-    # through ENVIRON, not -v: awk would turn the \. in the pattern (and any
-    # backslash in a value) into something else
-    USBNP_RE="^$2[[:space:]]*=" USBNP_NL="$3" awk '
-        BEGIN { re = ENVIRON["USBNP_RE"]; nl = ENVIRON["USBNP_NL"] }
-        $0 ~ re { if (!done && nl != "") print nl; done = 1; next }
-        { print }
-        END { if (!done && nl != "") print nl }
-    ' "$1" > "$1.usbnp.tmp" && cat "$1.usbnp.tmp" > "$1" && rm -f "$1.usbnp.tmp"
+    printf '%s\t%s\n' "$2" "$3" | replace_key_lines "$1"
 }
 
 BLOCK_BEGIN='# >>> usb-netplay (added by USB Netplay; remove it with "USB Netplay - Remove")'
 BLOCK_END='# <<< usb-netplay'
 
+# rw_for PATH: KNULLI and Batocera mount /boot read-only; make it writable for
+# a change there (rw_done makes it read-only again)
+rw_for() {
+    case "$1" in /boot/*) : ;; *) return 0 ;; esac
+    [ -z "$R" ] || return 0   # a test tree is writable
+    grep -q ' /boot [^ ]* ro[ ,]' /proc/mounts 2>/dev/null || return 0
+    mount -o remount,rw /boot || return 1
+    RW_BOOT=1
+}
+rw_done() {
+    [ -n "$RW_BOOT" ] && mount -o remount,ro /boot
+    RW_BOOT=
+    return 0
+}
+
+# block_body FILE: what is between our markers in FILE now
+block_body() {
+    awk -v b="$BLOCK_BEGIN" -v e="$BLOCK_END" '$0 == b { on = 1; next } $0 == e { on = 0 } on' "$1"
+}
+
 # add_block PATH: add stdin as a marked block at the end of PATH (once)
 add_block() {
     local body nl
     body=$(cat)
+    # already there and the same: nothing to write
+    if [ -f "$R$1" ] && grep -q -x -F -e "$BLOCK_BEGIN" "$R$1" && [ "$(block_body "$R$1")" = "$body" ]; then
+        manifest_prefix_has "block${TAB}$1${TAB}" || manifest_add "block${TAB}$1${TAB}"
+        return 0
+    fi
+    rw_for "$1" || return 1
     [ -f "$R$1" ] || bk_file "$1"
     strip_block "$R$1"
     nl=
@@ -215,7 +334,8 @@ undo_all() {
                 fi
                 ;;
             block)
-                strip_block "$R$path" "$a"
+                rw_for "$path" && strip_block "$R$path" "$a"
+                rw_done
                 ;;
         esac
     done

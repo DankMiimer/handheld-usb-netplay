@@ -9,6 +9,10 @@ to open a data connection, and pairs the two. While it runs, the name
 usb-netplay (RetroArch's pre-filled netplay host) points at 127.0.0.1; when
 the control connection goes away (cable out, tunnel stopped, no ping for
 20 s) it points usb-netplay back and exits.
+
+When the tunnel says it can ("PORTS gblink"), it also listens on
+127.0.0.1:56400 for this handheld's Gambatte connecting to the Game Boy link
+server on the other handheld ("OPEN n gblink").
 """
 import os
 import select
@@ -20,10 +24,23 @@ import time
 
 JOIN_PORT = int(os.environ.get('USBNP_JOIN_PORT', 55435))
 HELPER_PORT = int(os.environ.get('USBNP_HELPER_PORT', 55439))
+GBLINK_PORT = int(os.environ.get('USBNP_GBLINK_PORT', 56400))   # Gambatte's Game Link
 PING_TIMEOUT = 20
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOSTS = os.environ.get('USBNP_HOSTS_CMD', '/bin/sh %s/usbnp hosts-adb' % HERE)
 LOG = os.environ.get('USBNP_HELPER_LOG', '/tmp/usb-netplay-helper.log')
+# the other handheld's info (lib/info.sh), sent by the tunnel, for the status here
+HOST_INFO = os.path.join(HERE, 'state', 'adb-host-info')
+
+
+def save_host_info(data):
+    try:
+        os.makedirs(os.path.dirname(HOST_INFO), exist_ok=True)
+        with open(HOST_INFO + '.tmp', 'wb') as f:
+            f.write(data)
+        os.replace(HOST_INFO + '.tmp', HOST_INFO)
+    except OSError:
+        pass
 
 
 def log(msg):
@@ -107,11 +124,13 @@ def main():
     log('tunnel up')
     pending = {}   # id -> (client socket, time)
     next_id = 1
+    gb = None      # the Game Boy link listener, once the tunnel can carry it
     last_ping = last_check = time.time()
     buf = b''
+    info_left = None   # bytes of an INFO block still to come
     try:
         while True:
-            r, _, _ = select.select([ctrl, net, tun], [], [], 2)
+            r, _, _ = select.select([ctrl, net, tun] + ([gb] if gb else []), [], [], 2)
             now = time.time()
             if ctrl in r:
                 data = ctrl.recv(4096)
@@ -119,14 +138,35 @@ def main():
                     log('control connection closed')
                     break
                 buf += data
-                while b'\n' in buf:
+                while True:
+                    if info_left is not None:
+                        # "INFO n" is followed by n bytes: the tunnel's handheld info
+                        if len(buf) < info_left:
+                            break
+                        save_host_info(buf[:info_left])
+                        buf, info_left = buf[info_left:], None
+                    if b'\n' not in buf:
+                        break
                     line, buf = buf.split(b'\n', 1)
-                    if line == b'PING':
+                    if line.startswith(b'INFO ') and line[5:].isdigit() and int(line[5:]) <= 8000:
+                        info_left = int(line[5:])
+                    elif line == b'PING':
                         last_ping = now
+                    elif line.startswith(b'PORTS ') and b'gblink' in line.split() and not gb:
+                        try:
+                            gb = listener(GBLINK_PORT)
+                            log('Game Boy link: listening on 127.0.0.1:%d' % GBLINK_PORT)
+                        except OSError as e:
+                            log('Game Boy link: can\'t listen on %d: %s' % (GBLINK_PORT, e))
             if net in r:
                 client, _ = net.accept()
                 pending[next_id] = (client, now)
                 ctrl.sendall(b'OPEN %d\n' % next_id)
+                next_id += 1
+            if gb and gb in r:
+                client, _ = gb.accept()
+                pending[next_id] = (client, now)
+                ctrl.sendall(b'OPEN %d gblink\n' % next_id)
                 next_id += 1
             if tun in r:
                 conn, _ = tun.accept()
@@ -151,6 +191,10 @@ def main():
                 last_check = now
                 hosts('up')
     finally:
+        try:
+            os.remove(HOST_INFO)
+        except OSError:
+            pass
         hosts('down')
         log('tunnel down')
 

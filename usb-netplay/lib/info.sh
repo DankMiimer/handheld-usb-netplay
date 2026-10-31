@@ -87,14 +87,41 @@ peer_info() {
     [ -n "$PY" ] && [ -z "$USBNP_DRYRUN" ] && "$PY" "$HERE/lib/info.py" ask "$1" 1 2>/dev/null
 }
 
-info_field() { printf '%s\n' "$1" | sed -n "s/^$(key_regex "$2")=//p" | head -n 1; }
+info_field() { printf '%s\n' "$1" | tr -d '\r' | sed -n "s/^$(key_regex "$2")=//p" | head -n 1; }
 
-# peer_report ADDRESS: compare this handheld with the one at ADDRESS
+# gadget_info_refresh: ask the host on this handheld's gadget for its info and
+# keep it (peer-info.IF). Asked in each of the first 3 rounds after the host
+# answers a ping, then every 30 s until it answers: its USB Netplay may start
+# after the link. A PC never answers, so it is never taken for a handheld.
+gadget_info_refresh() {
+    local f ifc n
+    for f in "$STATE"/gadget-host.*; do
+        [ -f "$f" ] || continue
+        ifc=${f##*/gadget-host.}
+        [ -s "$STATE/peer-info.$ifc" ] && continue
+        echo x >> "$STATE/asked.$ifc"
+        n=$(wc -l < "$STATE/asked.$ifc")
+        [ "$n" -le 3 ] || [ $((n % 6)) = 0 ] || continue
+        peer_info "$(head -n 1 "$f")" > "$STATE/peer-info.$ifc.tmp" 2>/dev/null
+        if [ -s "$STATE/peer-info.$ifc.tmp" ]; then
+            mv "$STATE/peer-info.$ifc.tmp" "$STATE/peer-info.$ifc"
+        else
+            rm -f "$STATE/peer-info.$ifc.tmp"
+        fi
+    done
+}
+
+# peer_report ADDRESS [FILE]: compare this handheld with the one at ADDRESS
+# (or with the info in FILE, which the ADB tunnel brought)
 peer_report() {
     local theirs mine c a b same diff only s
-    theirs=$(peer_info "$1")
+    if [ -n "$2" ]; then
+        theirs=$(cat "$2" 2>/dev/null)
+    else
+        theirs=$(peer_info "$1")
+    fi
     if [ -z "$theirs" ]; then
-        echo "  ($1 doesn't answer USB Netplay's info request: it has no USB Netplay 0.1.3 or newer, or isn't a handheld)"
+        echo "  ($1 doesn't answer USB Netplay's info request: a PC, or a handheld without USB Netplay 0.1.3 or newer)"
         return 0
     fi
     info_write

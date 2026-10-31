@@ -81,6 +81,23 @@ EOF
 
 fw_watch_tick() { rocknix_gadget_check; }
 
+# Gambatte's options for games in roms/gb and roms/gbc, as RetroArch folder
+# options: ROCKNIX's setsettings overwrites Gambatte.opt at every launch (its
+# test [ ! -f "GAMBATTECONF" ] lacks a $).
+GBLINK_FW=1
+fw_gambatte_set() {
+    local f
+    for f in /storage/.config/retroarch/config/Gambatte/gb.opt /storage/.config/retroarch/config/Gambatte/gbc.opt; do
+        if [ ! -f "$R$f" ]; then
+            bk_file "$f"
+            mkdir -p "$(dirname "$R$f")"
+            # what ROCKNIX itself sets in Gambatte.opt, which this file hides
+            printf '%s\n' 'gambatte_gbc_color_correction = "disabled"' > "$R$f"
+        fi
+        set_keys "$f" ra "$@"
+    done
+}
+
 fw_hooks_extra() { :; }
 
 fw_restart_frontend() {

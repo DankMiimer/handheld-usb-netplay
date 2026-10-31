@@ -74,6 +74,20 @@ fw_retroarch() {
 
 fw_gadget_setup() { :; }
 
+# Gambatte's options for every system it runs: global.retroarchcore.KEY=VALUE,
+# the only way into KNULLI's launcher. All keys in one write (see set_keys).
+GBLINK_FW=1
+fw_gambatte_set() {
+    local n
+    n=$(($# / 2))
+    while [ $n -gt 0 ]; do
+        set -- "$@" "global.retroarchcore.$1" "$2"
+        shift 2
+        n=$((n - 1))
+    done
+    set_keys "$SETCONF" conf "$@"
+}
+
 fw_watch_tick() {
     [ "$DEV_MODE" = own ] && own_gadget_up
 }

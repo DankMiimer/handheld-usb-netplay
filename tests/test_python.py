@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.join(SRC, 'lib'))
 sys.path.insert(0, os.path.join(SRC, 'adb'))
 
 # ports used by this test only, so a real RetroArch or helper can't interfere
-os.environ.update(USBNP_NETPLAY_PORT='57435', USBNP_HELPER_PORT='57439', USBNP_JOIN_PORT='56435')
+os.environ.update(USBNP_NETPLAY_PORT='57435', USBNP_HELPER_PORT='57439', USBNP_JOIN_PORT='56435',
+                  USBNP_GBLINK_SERVER_PORT='57400', USBNP_GBLINK_PORT='56401')
 
 import dhcp_probe   # noqa: E402
 import info         # noqa: E402
@@ -313,6 +314,76 @@ class TunnelTest(unittest.TestCase):
         self.assertIsInstance(result.get('error'), tunnel.Gone)
         self.assertTrue(wait_for(lambda: 'down' in self.hosts(), 30), 'usb-netplay not put back after unplug')
         srv.close()
+
+    def test_game_boy_link_goes_through_the_tunnel(self):
+        srv = echo_server(57400)          # stands in for this handheld's Gambatte link server
+        adbd = FakeAdbd()
+        adbd.start()
+        t, result = self.run_session(adbd)
+        self.assertTrue(wait_for(lambda: 'up' in self.hosts()), 'helper never came up')
+        c = None
+        end = time.time() + 10
+        while c is None and time.time() < end:   # the helper listens once it reads PORTS
+            try:
+                c = socket.create_connection(('127.0.0.1', 56401), timeout=2)
+            except OSError:
+                time.sleep(0.2)
+        self.assertIsNotNone(c, 'the helper never listened for the Game Boy link')
+        c.settimeout(5)
+        for b in (b'\x29\x00', b'\x55\x80', b'\x1c\x00'):   # Gambatte's 2-byte exchanges
+            c.sendall(b)
+            self.assertEqual(c.recv(2), b)
+        c.close()
+        adbd.unplug()
+        t.join(10)
+        srv.close()
+
+    def test_the_two_handhelds_swap_info(self):
+        # a copy of USB Netplay "installed" on the other handheld, with its info
+        inst = os.path.join(self.tmp, 'other', 'usb-netplay')
+        os.makedirs(os.path.join(inst, 'adb'))
+        os.makedirs(os.path.join(inst, 'state'))
+        with open(os.path.join(SRC, 'adb', 'helper.py')) as src, open(os.path.join(inst, 'adb', 'helper.py'), 'w') as dst:
+            dst.write(src.read())
+        with open(os.path.join(inst, 'state', 'info'), 'w') as f:
+            f.write('usbnp=0.1.3\nfirmware=KNULLI 2024.11\ncore.fceumm=4661bc57\n')
+        tunnel.HELPER_PATHS = [os.path.join(inst, 'adb', 'helper.py')]
+        here = os.path.join(self.tmp, 'here')
+        os.makedirs(here)
+        with open(os.path.join(here, 'info'), 'w') as f:
+            f.write('usbnp=0.1.3\nfirmware=ROCKNIX 20261001\ncore.fceumm=1234abcd\n')
+        os.environ['USBNP_STATE'] = here
+        try:
+            adbd = FakeAdbd()
+            adbd.start()
+            t, result = self.run_session(adbd)
+
+            def read(p):
+                try:
+                    with open(p) as f:
+                        return f.read()
+                except OSError:
+                    return ''
+            self.assertTrue(wait_for(lambda: 'KNULLI' in read(os.path.join(here, 'adb-device-info'))),
+                            'the tunnel never read the other handheld\'s info')
+            self.assertTrue(wait_for(lambda: 'ROCKNIX' in read(os.path.join(inst, 'state', 'adb-host-info'))),
+                            'the helper never got this handheld\'s info')
+            adbd.unplug()
+            t.join(10)
+            subprocess.call(['pkill', '-f', os.path.join(inst, 'adb', 'helper.py')])
+        finally:
+            del os.environ['USBNP_STATE']
+
+    def test_info_from_an_old_adbd_shell(self):
+        # KNULLI's adbd runs shell: on a terminal, which sends \r\n
+        self.assertEqual(tunnel.clean_info(b'usbnp=0.1.3\r\ncore.nestopia=6381df7a\r\n'),
+                         b'usbnp=0.1.3\ncore.nestopia=6381df7a\n')
+
+    def test_only_known_ports_are_connected(self):
+        self.assertEqual(set(tunnel.LOCAL_PORTS), {'join', 'gblink'})
+        link = tunnel.Link(FakeTransport(FakeAdbd()))
+        with self.assertRaises(KeyError):
+            tunnel.data_connection(link, 1, 'ssh')
 
     def test_phone_is_left_alone(self):
         adbd = FakeAdbd(auth=True)

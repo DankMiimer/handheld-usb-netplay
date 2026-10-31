@@ -85,6 +85,40 @@ you which way you connected: a ping of about 2 ms means the cable, 20 ms and
 up means Wi-Fi. A game that is already running stays on Wi-Fi until you
 rejoin.
 
+### Game Boy link cable (GB and GBC)
+
+On ROCKNIX, KNULLI and Batocera, USB Netplay also sets up the Game Boy link
+cable for the Gambatte core (trading and battling Pokémon, 2-player Tetris,
+and so on). While a cable link is up, the USB host is the link server and the
+USB device connects to it, through the ADB tunnel too. Start the games after
+the cable is linked; RetroArch reads the setting when a game starts.
+
+1. Start the game on the **USB host** first, then on the other handheld.
+2. Wait about **30 seconds**. Gambatte's server only looks for its partner
+   now and then.
+3. Start the link move (2 PLAYER, the Cable Club...) on the **USB host
+   only**. If both sides start it at once, both act as the sender and one of
+   them freezes until the other game quits.
+
+The status says which side this handheld is. On an RG Nano running USB Link,
+set picoarch's Gambatte options by hand:
+- Game Link Mode: Network Client
+- port: 56400
+- server address: 010.170.000.006, the RG DS end of the Nano's link.
+
+`GBLINK=no` in `settings.conf` leaves Gambatte's settings alone.
+
+### Playing against a PC
+
+A handheld in ROCKNIX's USB network mode also works as a network adapter for
+a PC. Windows 11 and Linux recognise it without a driver install, and the PC
+gets its address from the handheld. Plug the handheld into the PC with a
+normal cable (the PC is the USB host), host the game on the handheld, and on
+the PC choose **Connect to Netplay Host** with the handheld's cable address.
+The status shows it as "its cable address is 10.x.y.2". The PC's RetroArch
+must run the same core build as the handheld, so copy the handheld's core
+over if netplay refuses to connect or desyncs.
+
 ### Settings (optional)
 
 Copy `usb-netplay/settings.example.conf` to `usb-netplay/settings.conf` and
@@ -97,6 +131,7 @@ again.
   (the host list still works on Wi-Fi).
 - `NOTIFY=no` turns off the notices when the cable link comes up or goes
   down.
+- `GBLINK=no` leaves the Game Boy core's link settings alone.
 
 ### Removing it
 
@@ -115,7 +150,8 @@ and says so plainly if a handheld can't take part.
 | USB host (OTG adapter) | USB device | How they link | Also tested |
 |---|---|---|---|
 | ROCKNIX, RK3566 (Anbernic RG DS) | ROCKNIX, RK3326 (R36S clone, AurkNix build) | ROCKNIX's own USB network gadget, address by DHCP | replug, reboot with the cable in |
-| ROCKNIX, RK3566 (Anbernic RG DS) | KNULLI, H700 (Anbernic RG34XX-SP) | ADB tunnel (the H700 kernel has no USB network gadget); the RG DS hosts | replug, reboot of both* |
+| ROCKNIX, RK3566 (Anbernic RG DS) | KNULLI, H700 (Anbernic RG34XX-SP) | ADB tunnel (the H700 kernel has no USB network gadget); the RG DS hosts | replug, reboot of both*; Game Boy link (Tetris 2-player) through the tunnel; core comparison over ADB |
+| ROCKNIX, RK3566 (Anbernic RG DS) | FunKey OS (RG Nano, USB Link app) | the Nano's fixed address; no netplay on the Nano | Game Boy link (Tetris 2-player), set by hand on the Nano |
 | KNULLI, H700 (Anbernic RG34XX-SP) | ROCKNIX, RK3326 (R36S clone) | ROCKNIX's own USB network gadget, address by DHCP | |
 
 \* The replug and reboot of the RG DS and RG34XX-SP pair were tested with the

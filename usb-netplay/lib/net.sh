@@ -17,6 +17,9 @@ USB_NET_DRIVERS="cdc_ncm cdc_ether rndis_host cdc_eem cdc_subset"
 # addresses above: Linux's multifunction gadget (ROCKNIX, JELOS, KNULLI, USB
 # Netplay's own), the RG Nano's FunKey OS, and the kernel's g_ether/g_ncm.
 HANDHELD_USB_IDS="1d6b:0104 8087:011e 0525:a4a1 0525:a4a2"
+# gadgets that never hand out an address: straight to the static addresses
+# (the RG Nano's USB Link), which saves the DHCP probe's 6 s
+STATIC_FIRST_IDS="8087:011e"
 
 ipcmd() { run ip "$@"; }
 # ipq ARGS: read-only ip queries (nothing in a dry run)
@@ -97,7 +100,13 @@ find_peer() {
     fi
     # 2. the gadget hands out an address (ROCKNIX's udhcpd): ask it
     ipcmd link set "$1" up
-    if [ -n "$USBNP_FAKE_DHCP" ]; then
+    case " $STATIC_FIRST_IDS " in
+        *" $(usb_id "$1") "*) out=static-first ;;
+        *) out= ;;
+    esac
+    if [ "$out" = static-first ]; then
+        out=
+    elif [ -n "$USBNP_FAKE_DHCP" ]; then
         out=$USBNP_FAKE_DHCP
     elif [ -n "$PY" ]; then
         out=$("$PY" "$HERE/lib/dhcp_probe.py" "$1" 6 2>/dev/null)
@@ -214,6 +223,53 @@ link_down() {
     else
         hosts_set "$NETPLAY_NAME" "$FALLBACK_HOST"
     fi
+}
+
+# host_port_check: a host port can give up on a device that failed to connect
+# ("unable to enumerate USB device", seen with an RG Nano on an RG DS) and
+# then ignore it, even after the device starts over. A port that stays in the
+# "default" state with no device on it for 15 s gets its controller reset
+# (driver unbound and bound again), which cuts and restores the port's power
+# like an unplug. Only plain host controllers (EHCI, OHCI, xHCI; never a
+# dual-role one that also runs this handheld's gadget), only when nothing else
+# is plugged into them, at most once in 2 minutes.
+host_port_check() {
+    local p b bus n f
+    for p in "$R"/sys/bus/usb/devices/usb*/*-0:1.0/usb*-port*; do
+        [ -f "$p/state" ] || continue
+        b=${p##*/}
+        bus=${b#usb}
+        bus=${bus%%-port*}
+        n=${b##*-port}
+        f="$STATE/stuck.usb$bus-$n"
+        if [ "$(cat "$p/state" 2>/dev/null)" = default ] && [ ! -e "$R/sys/bus/usb/devices/$bus-$n" ]; then
+            echo x >> "$f"
+            if [ "$(wc -l < "$f")" -ge 3 ]; then
+                rm -f "$f"
+                host_reset "$bus" "$n"
+            fi
+        else
+            rm -f "$f"
+        fi
+    done
+}
+
+host_reset() {
+    local hc drv name last now
+    hc=$(cd -P "$R/sys/bus/usb/devices/usb$1" 2>/dev/null && cd -P .. && pwd -P) || return 0
+    drv=$(cd -P "$hc/driver" 2>/dev/null && pwd -P) || return 0
+    name=${hc##*/}
+    case "${drv##*/}" in
+        ehci-platform|ohci-platform|ehci-pci|ohci-pci|xhci-hcd|xhci_hcd|xhci-plat-hcd) : ;;
+        *) return 0 ;;   # dwc2, dwc3, musb...: they may carry this handheld's gadget
+    esac
+    ls "$R/sys/bus/usb/devices" 2>/dev/null | grep -q "^$1-[0-9.]*\$" && return 0
+    now=$(date +%s)
+    last=$(cat "$STATE/reset.$name" 2>/dev/null)
+    [ -n "$last" ] && [ $((now - last)) -lt 120 ] && return 0
+    echo "$now" > "$STATE/reset.$name"
+    log "host port usb$1-port$2: stuck after a device failed to connect; resetting $name (${drv##*/})"
+    run sh -c "echo $name > $drv/unbind; sleep 2; echo $name > $drv/bind"
 }
 
 # --- device side -----------------------------------------------------------

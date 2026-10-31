@@ -8,7 +8,9 @@ usbfs, starts USB Netplay's helper on it (adb/helper.py, installed there by
 USB Netplay) and keeps a control connection to the helper (adbd's
 "tcp:55439" service). When the other handheld's RetroArch joins (it connects
 to 127.0.0.1:55435 there), the helper asks for a data connection and this
-connects it to this handheld's RetroArch host on 127.0.0.1:55435.
+connects it to this handheld's RetroArch host on 127.0.0.1:55435. The same
+carries the Game Boy link (Gambatte's network link) to this handheld's link
+server on 127.0.0.1:56400 ("PORTS gblink" tells the helper it can).
 
 It only ever touches a device that (1) has an ADB interface, (2) lets in an
 unauthenticated host (phones ask for authorisation and are skipped), and
@@ -32,6 +34,9 @@ USBDEVFS_BULK = 0xC0185502            # _IOWR('U', 2, struct usbdevfs_bulktransf
 USBDEVFS_CLAIMINTERFACE = 0x8004550F  # _IOR('U', 15, unsigned int)
 NETPLAY_PORT = int(os.environ.get('USBNP_NETPLAY_PORT', 55435))   # RetroArch host here
 HELPER_PORT = int(os.environ.get('USBNP_HELPER_PORT', 55439))     # helper on the other handheld
+GBLINK_SERVER_PORT = int(os.environ.get('USBNP_GBLINK_SERVER_PORT', 56400))   # Gambatte's link server here
+# what the helper may ask to be connected to here: nothing else
+LOCAL_PORTS = {'join': NETPLAY_PORT, 'gblink': GBLINK_SERVER_PORT}
 PING_EVERY = 5
 NO_HELPER = 'USBNP-NO-HELPER'
 # where USB Netplay installs itself on each firmware (see lib/detect.sh)
@@ -258,15 +263,56 @@ def start_helper(link):
         raise Skip('USB Netplay is not installed on it')
 
 
-def data_connection(link, cid):
-    """The other handheld's RetroArch is joining: connect it to the RetroArch host here."""
+def state_dir():
+    """USB Netplay's state directory here (set by usbnp watch), or None."""
+    return os.environ.get('USBNP_STATE') or None
+
+
+def clean_info(data):
+    """Text from an old adbd's shell: its terminal turned every \\n into \\r\\n."""
+    return data.replace(b'\r\n', b'\n').replace(b'\r', b'')
+
+
+def fetch_peer_info(link):
+    """The other handheld's USB Netplay info (lib/info.sh), for the status here."""
+    state = state_dir()
+    if not state:
+        return
+    paths = ' '.join(os.path.join(os.path.dirname(os.path.dirname(p)), 'state', 'info') for p in HELPER_PATHS)
+    out = bytearray()
     try:
-        local = socket.create_connection(('127.0.0.1', NETPLAY_PORT), timeout=3)
+        sh = link.open('shell:for f in %s; do [ -f "$f" ] && exec cat "$f"; done' % paths, on_data=out.extend)
+        sh.closed.wait(5)
+    except (OSError, Gone):
+        return
+    out = clean_info(bytes(out))
+    if out:
+        with open(os.path.join(state, 'adb-device-info.tmp'), 'wb') as f:
+            f.write(out[:8000])
+        os.replace(os.path.join(state, 'adb-device-info.tmp'), os.path.join(state, 'adb-device-info'))
+
+
+def own_info():
+    """This handheld's info file, for the helper on the other handheld."""
+    state = state_dir()
+    try:
+        with open(os.path.join(state, 'info'), 'rb') as f:
+            return f.read(8000)
+    except (OSError, TypeError):
+        return b''
+
+
+def data_connection(link, cid, what='join'):
+    """The other handheld's RetroArch is joining (or its Gambatte linking):
+    connect it to the RetroArch host (or the Game Boy link server) here."""
+    port = LOCAL_PORTS[what]
+    try:
+        local = socket.create_connection(('127.0.0.1', port), timeout=3)
         local.settimeout(None)
         local.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except OSError:
         local = None
-        log('join %d: nothing is hosting on port %d here' % (cid, NETPLAY_PORT))
+        log('%s %d: nothing is listening on port %d here' % (what, cid, port))
     try:
         s = link.open('tcp:%d' % HELPER_PORT, on_data=local.sendall if local else None)
         s.on_close = (lambda: shut(local)) if local else None
@@ -278,7 +324,7 @@ def data_connection(link, cid):
     if not local:
         s.close()
         return
-    log('join %d: connected to the RetroArch host' % cid)
+    log('%s %d: connected to the %s' % (what, cid, 'RetroArch host' if what == 'join' else 'Game Boy link server'))
     try:
         while True:
             data = local.recv(65536)
@@ -289,7 +335,7 @@ def data_connection(link, cid):
         pass
     s.close()
     local.close()
-    log('join %d: closed' % cid)
+    log('%s %d: closed' % (what, cid))
 
 
 def _run(link):
@@ -316,7 +362,12 @@ def session(link):
             line = bytes(buf[:i]).decode(errors='replace')
             del buf[:i + 1]
             if line.startswith('OPEN '):
-                threading.Thread(target=data_connection, args=(link, int(line[5:])), daemon=True).start()
+                words = line.split()
+                what = words[2] if len(words) > 2 else 'join'
+                if len(words) > 3 or not words[1].isdigit() or what not in LOCAL_PORTS:
+                    log('ignored a request from the helper: %r' % line[:40])
+                    continue
+                threading.Thread(target=data_connection, args=(link, int(words[1]), what), daemon=True).start()
             elif line == 'READY':
                 log('helper ready: the other handheld can join on 127.0.0.1:%d' % NETPLAY_PORT)
             elif line == 'BUSY':
@@ -331,6 +382,11 @@ def session(link):
     if not ctrl:
         raise Gone('the helper on the other handheld did not start')
     ctrl.write(b'CTRL\n')
+    ctrl.write(b'PORTS gblink\n')   # an older helper ignores this line
+    info = own_info()
+    if info:
+        ctrl.write(b'INFO %d\n' % len(info) + info)   # and these KEY=VALUE lines
+    fetch_peer_info(link)
     while reader.is_alive() and not ctrl.closed.is_set():
         reader.join(PING_EVERY)
         if reader.is_alive():
@@ -359,6 +415,11 @@ def main():
                     session(link)
                 finally:
                     link.drop_all()
+                    if state_dir():
+                        try:
+                            os.remove(os.path.join(state_dir(), 'adb-device-info'))
+                        except OSError:
+                            pass
             except Skip as e:
                 log('%s: %s' % (os.path.basename(d), e))
                 skipped[d] = devnum
