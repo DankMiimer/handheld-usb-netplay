@@ -5,3 +5,5 @@ usb-netplay/usbnp.log
 usb-netplay/last-run.txt
 usb-netplay/settings.conf
 dist/
+handheld-link/funkey/*.opk
+handheld-link/preview/

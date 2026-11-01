@@ -3,7 +3,7 @@
 # firmware trees, and the Python tests. Needs dash, shellcheck and python3.
 cd "$(dirname "$0")/.." || exit 1
 rc=0
-SH_FILES="usb-netplay/usbnp usb-netplay/lib/*.sh usb-netplay/lib/fw/*.sh USB?Netplay.sh USB?Netplay?-?Remove.sh"
+SH_FILES="usb-netplay/usbnp usb-netplay/lib/*.sh usb-netplay/lib/fw/*.sh USB?Netplay.sh USB?Netplay?-?Remove.sh handheld-link/funkey/*.sh"
 
 echo "== shellcheck"
 # shellcheck disable=SC2086   # the file list is a glob on purpose
@@ -20,6 +20,11 @@ echo "== python"
 python3 -m py_compile usb-netplay/adb/tunnel.py usb-netplay/adb/helper.py usb-netplay/lib/dhcp_probe.py || rc=1
 out=$(python3 tests/test_python.py 2>&1) || rc=1
 printf '%s\n' "$out" | tail -n 12
+
+echo "== handheld link (python)"
+python3 -m py_compile handheld-link/hlink/*.py handheld-link/tools/*.py || rc=1
+out=$(python3 tests/test_hlink.py 2>&1) || rc=1
+printf '%s\n' "$out" | tail -n 4
 
 [ $rc = 0 ] && echo "ALL TESTS PASSED" || echo "SOME TESTS FAILED"
 exit $rc

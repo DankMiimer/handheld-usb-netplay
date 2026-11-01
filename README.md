@@ -1,4 +1,31 @@
-# USB Netplay
+# Handheld USB Link
+
+Two retro handhelds, one USB cable, no Wi-Fi or PC in between:
+
+- **[Handheld Link](handheld-link/README.md)** (new in 0.3.0): browse the
+  other handheld and send it ROMs, saves, save states, game art, apps and
+  settings, from either side. For FunKey OS handhelds (RG Nano, GBA Mini,
+  FunKey S clones) so far.
+- **USB Netplay:** RetroArch netplay and the Game Boy link cable over the
+  cable, on ROCKNIX, KNULLI, Batocera, AmberELEC, dArkOS and muOS.
+
+Both use the same cabling: an OTG adapter on the handheld that is the USB
+host, and a normal USB cable to the other one. This project used to be
+called handheld-usb-netplay; old links still lead here.
+
+## Handheld Link
+
+![Browsing the other handheld's games](docs/images/handheld-link-games.png)
+
+Install `HandheldLink-<version>.opk` from the
+[latest release](https://github.com/DankMiimer/handheld-usb-link/releases/latest)
+into **Applications** on both handhelds, connect them (OTG adapter on the RG
+Nano), and open **Handheld Link** on both. **L / R** switches between the
+two handhelds, **A** marks games, **Start** sends them. If a file is already
+there, it asks what to do. Everything else, including what goes where and
+the speed, is in [handheld-link/README.md](handheld-link/README.md).
+
+## USB Netplay
 
 RetroArch netplay between two Linux retro handhelds over a USB cable instead
 of Wi-Fi. Install it on both handhelds, run it once from the menu, plug the
@@ -10,9 +37,9 @@ It is a menu script, not a firmware patch. It works out what each handheld
 can do, picks the right way to link them, and lets RetroArch find the other
 handheld by itself. **USB Netplay - Remove** undoes every change it made.
 
-## What you need
+### What you need
 
-- Two handhelds on firmware from the [support table](#which-handhelds-work).
+- Two handhelds on firmware from the [support table](#which-handhelds-work-netplay).
   At least one of them must be able to act as the **USB device**.
 - An **OTG adapter** (USB-C or micro-USB male to USB-A female) and a normal
   USB-A cable to the other handheld's data port.
@@ -20,7 +47,7 @@ handheld by itself. **USB Netplay - Remove** undoes every change it made.
   refuses to connect otherwise. USB Netplay's status screen lists the core
   checksums so you can compare them.
 
-### Cable safety
+#### Cable safety
 
 - **The OTG adapter goes on the USB host**, the handheld that powers the link.
   The other handheld is the USB device.
@@ -34,10 +61,10 @@ handheld by itself. **USB Netplay - Remove** undoes every change it made.
   cable in, a ROCKNIX R36S clone froze when its USB mode was turned off,
   because that makes both ends USB hosts.
 
-## Install
+### Install
 
 Download `usb-netplay-<version>.zip` from the
-[latest release](https://github.com/DankMiimer/handheld-usb-netplay/releases/latest).
+[latest release](https://github.com/DankMiimer/handheld-usb-link/releases/latest).
 Unpack it into the **Ports** folder, so that `USB Netplay.sh`,
 `USB Netplay - Remove.sh` and the `usb-netplay` folder sit side by side.
 
@@ -51,7 +78,7 @@ Unpack it into the **Ports** folder, so that `USB Netplay.sh`,
 If the entries don't show up, refresh the game list (KNULLI and Batocera:
 Game Settings > Update Gamelists) or restart the frontend.
 
-## How to play
+### How to play
 
 1. On **both** handhelds, open **Ports > USB Netplay**. It sets itself up and
    shows a status screen (where it can, the screen closes by itself after 25
@@ -85,7 +112,7 @@ you which way you connected: a ping of about 2 ms means the cable, 20 ms and
 up means Wi-Fi. A game that is already running stays on Wi-Fi until you
 rejoin.
 
-### Game Boy link cable (GB and GBC)
+#### Game Boy link cable (GB and GBC)
 
 On ROCKNIX, KNULLI and Batocera, USB Netplay also sets up the Game Boy link
 cable for the Gambatte core (trading and battling Pokémon, 2-player Tetris,
@@ -108,7 +135,7 @@ set picoarch's Gambatte options by hand:
 
 `GBLINK=no` in `settings.conf` leaves Gambatte's settings alone.
 
-### Playing against a PC
+#### Playing against a PC
 
 A handheld in ROCKNIX's USB network mode also works as a network adapter for
 a PC. Windows 11 and Linux recognise it without a driver install, and the PC
@@ -119,7 +146,7 @@ The status shows it as "its cable address is 10.x.y.2". The PC's RetroArch
 must run the same core build as the handheld, so copy the handheld's core
 over if netplay refuses to connect or desyncs.
 
-### Settings (optional)
+#### Settings (optional)
 
 Copy `usb-netplay/settings.example.conf` to `usb-netplay/settings.conf` and
 edit the copy, so that updates don't overwrite it. Then run USB Netplay
@@ -133,13 +160,13 @@ again.
   down.
 - `GBLINK=no` leaves the Game Boy core's link settings alone.
 
-### Removing it
+#### Removing it
 
 Run **Ports > USB Netplay - Remove**. It restores every file it changed from
 its own record of the changes, then deletes its installed copy. You can then
 delete the files from Ports.
 
-## Which handhelds work
+### Which handhelds work (netplay)
 
 A link always has one **USB host** (the side with the OTG adapter) and one
 **USB device**. USB Netplay checks what each handheld can do when it runs,
@@ -188,7 +215,7 @@ tested with a join.
 Tried it on another handheld? Please open an issue with `last-run.txt` from
 the `usb-netplay` folder, whether it worked or not.
 
-## Troubleshooting
+### Troubleshooting
 
 - **"Host is running another core".** **Connect to Netplay Host** keeps the
   core you started with. Set the same default core on both handhelds (for
@@ -214,7 +241,7 @@ the `usb-netplay` folder, whether it worked or not.
   `/opt/usb-netplay` (dArkOS). Its `usbnp.log` records every link change, and
   `last-run.txt` has the last status report.
 
-## How it works
+### How it works
 
 The short version:
 
@@ -248,7 +275,10 @@ USBNP_TEST_SHELL="busybox ash" sh tests/run.sh
 The shell tests run `usbnp` against fake copies of each firmware's files
 (`tests/fixtures.sh`) with a dry-run hook, so nothing on the test machine is
 touched. They check that setup followed by remove leaves every tree exactly
-as it was.
+as it was. `tests/test_hlink.py` tests Handheld Link offline: its file
+service on fake FunKey cards, the stream groups, and the host's ADB code
+against a stand-in `adbd`. Building the Handheld Link OPK is described in
+[handheld-link/README.md](handheld-link/README.md#building).
 
 ## Credits
 
@@ -258,5 +288,8 @@ as it was.
   a different approach, and not affiliated with it.
 - Made with the help of an LLM coding assistant (Anthropic's Claude), under my
   direction, and tested on my own handhelds.
+- Handheld Link's font is converted from the Terminus Font by Dimitar
+  Toshkov Zhekov (SIL Open Font License 1.1, see
+  [handheld-link/FONT-LICENSE.txt](handheld-link/FONT-LICENSE.txt)).
 
 MIT licence, see [LICENSE](LICENSE).
