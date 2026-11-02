@@ -4,7 +4,7 @@ Browse another handheld over a USB cable and send it ROMs, saves, save
 states, game art, apps and settings. Either handheld can browse the other
 and send or fetch; there is no PC, Wi-Fi or approval step involved.
 
-Handheld Link 0.3.0 runs on **FunKey OS** (DrUm78's builds). It was tested
+Handheld Link runs on **FunKey OS** (DrUm78's builds). It was tested
 between an **Anbernic RG Nano** (240x240) and a **GBA Mini**, a 240x160
 FunKey S clone. The screens scale with the display, so other handhelds can
 follow.
@@ -81,11 +81,13 @@ screenshots, and USB Link's settings and keys.
 
 ## Speed
 
-Copying runs at roughly 1 to 2.5 MB/s: about 10 seconds for a 16 MB GBA
-game, several minutes for a PS1 disc. FunKey OS's `adbd` acknowledges every
-4 KB, so Handheld Link spreads each transfer over four ADB streams at once.
-The receiving handheld's `adbd` tops out around 2.5 to 3 MB/s, and on the RG
-Nano the Python that drives the USB side is close to its limit as well.
+Copying runs at about 1.2 MB/s from an RG Nano to a GBA Mini: about 15
+seconds for a 16 MB GBA game, a quarter of an hour for 1 GB. Both handhelds
+get warm during long copies, because the RG Nano's processor is busy the
+whole time. The limit is the Python on the RG Nano that drives the USB side.
+FunKey OS's `adbd` takes 4 KB at a time and acknowledges each piece, and
+Python needs about 3 ms per piece there. Four ADB streams at once (0.3.0)
+didn't change that. A faster link over USB networking is planned.
 
 ## Settings (optional)
 
@@ -133,10 +135,11 @@ Nano the Python that drives the USB side is close to its limit as well.
 - A file is written to `<name>.hlink-part` and renamed when it is complete,
   with the sender's date. File names from the other side are checked so
   nothing is written outside the folder it belongs in.
-- An OTG adapter switches the RG Nano's port to host mode by itself. If one
-  doesn't, Handheld Link switches it (never with a PC or charger on the
-  port), and puts it back when the other handheld is unplugged or the app
-  quits.
+- An OTG adapter switches the RG Nano's port to host mode by itself, and
+  Handheld Link leaves the port alone. For an adapter that doesn't, press A
+  on the other handheld's tab: Handheld Link switches the port (never with a
+  PC or charger on it) and puts it back after 30 s with nothing found, when
+  the other handheld is unplugged, or when the app quits.
 - The screen is drawn straight to the framebuffer. The font (6x12, 8x16 or
   12x24) and the layout follow the size of the panel's visible area, so the
   same screens fit 240x160 up to 640x480 and beyond.

@@ -411,6 +411,69 @@ class HostOverAdbTest(unittest.TestCase):
         tmp.cleanup()
 
 
+class Writes(bytearray):
+    """A stand-in framebuffer that counts the rows written to it."""
+
+    def __init__(self, n, line):
+        super().__init__(n)
+        self.line = line
+        self.rows = 0
+
+    def __setitem__(self, key, value):
+        if isinstance(key, slice):
+            self.rows += (key.stop - key.start) // self.line
+        super().__setitem__(key, value)
+
+
+class ScreenCostTest(unittest.TestCase):
+    """The screen is only redrawn and sent to the panel where it changed."""
+
+    def test_only_changed_rows_go_out(self):
+        os.environ["HLINK_HEADLESS"] = "240x160"
+        from hlink.screen import Screen
+        from hlink import app
+        s = Screen()
+        s.mm = Writes(s.line * s.h, s.line)
+        tmp = tempfile.TemporaryDirectory()
+        names = {"Game Boy Advance/%s %02d (USA, Europe) (En,Fr,De,Es,It).gba" % ("Pokemon Mystery Dungeon", i): b""
+                 for i in range(20)}
+        make_card(tmp.name, names)
+
+        class St:
+            status, text, activity, activity_at, version = "linked", "Linked", "", 0.0, 0
+            peer_info = {"name": "GBA Mini"}
+
+        class M:
+            port = None
+            state = St()
+
+        local = LocalSide(FunKeyContent(tmp.name), "RG Nano")
+        M.state.peer = local
+        ui = app.Ui(s, None, local, M(), "RG Nano")
+        ui.side, ui.cat, ui.group = 0, "roms", {"id": "gba", "name": "Game Boy Advance"}
+        ui.draw()                                         # (first "Loading", then the list)
+        s.mm.rows = 0
+        ui.draw()
+        self.assertEqual(s.mm.rows, s.h)                  # a full redraw sends it all
+        self.assertIsNotNone(ui.mq)                       # the selected name is too long
+        s.mm.rows = 0
+        ui.step_marquee()                                 # before a second: nothing moves
+        ui.redraw_footer()                                # unchanged: nothing goes out
+        self.assertEqual(s.mm.rows, 0)
+        ui.sel_since -= 1.5
+        ui.step_marquee()                                 # scrolling: only that row
+        self.assertTrue(0 < s.mm.rows <= ui.row_h, s.mm.rows)
+        ui.sel_since -= 60
+        ui.step_marquee()                                 # one pass, then it stops
+        self.assertIsNone(ui.mq)
+        M.state.activity, M.state.activity_at = "Receiving x.gba", __import__("time").monotonic()
+        s.mm.rows = 0
+        ui.redraw_footer()                                # a notice: only the bottom line
+        self.assertTrue(0 < s.mm.rows <= ui.foot_h, s.mm.rows)
+        os.environ.pop("HLINK_HEADLESS")
+        tmp.cleanup()
+
+
 class AdbTest(unittest.TestCase):
     def test_bulk_ioctl_matches_the_struct(self):
         import ctypes

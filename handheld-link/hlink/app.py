@@ -27,6 +27,9 @@ MARK = (255, 196, 64)
 GOOD = (96, 204, 128)
 BAD = (240, 96, 84)
 
+NOTE_FOR = 4          # seconds "Receiving ..." stays on the bottom line
+PROGRESS_EVERY = 0.5  # seconds between redraws of the copy screen
+
 
 class Back(Exception):
     pass
@@ -50,6 +53,10 @@ class Ui:
         self.lists: dict = {}
         self.sel_since = time.monotonic()
         self.seen = -1
+        self.mq: dict | None = None     # the selected row, while its long name can scroll
+        self.hint = ""
+        self.footer_at = 0.0
+        self.note_until = 0.0
         fh = screen.fh
         self.row_h = fh + 2
         self.tabs_h = fh + 4
@@ -167,10 +174,38 @@ class Ui:
         y = s.h - self.foot_h
         s.rect(0, y, s.w, self.foot_h, PANEL)
         st = self.m.state
-        if st.activity and time.monotonic() - st.activity_at < 4:
+        self.footer_at = time.monotonic()
+        if st.activity and self.footer_at - st.activity_at < NOTE_FOR:
             s.text(self.pad, y + 2, s.fit(fold(st.activity, s.glyphs), s.w - 2 * self.pad), ACCENT, PANEL)
+            self.note_until = st.activity_at + NOTE_FOR
         else:
             s.text(self.pad, y + 2, s.fit(hint, s.w - 2 * self.pad), DIM, PANEL)
+            self.note_until = 0.0
+
+    def redraw_footer(self) -> None:
+        """Only the bottom line (what is arriving), not the whole screen."""
+        self.draw_footer(self.hint)
+        self.s.flush()
+
+    def step_marquee(self) -> None:
+        """Scroll the selected row's long name once, redrawing only that row."""
+        mq, s = self.mq, self.s
+        t = time.monotonic() - self.sel_since
+        if not mq or t < 1.0:
+            return
+        over = len(mq["name"]) - mq["cols"]
+        step = int((t - 1.0) / 0.15)
+        if step > over + 8:
+            # one pass and a pause at the end: back to the start, and stop
+            shown = s.fit(mq["name"], mq["avail"])
+            self.mq = None
+        else:
+            shown = mq["name"][min(step, over):][:mq["cols"]]
+        if shown != mq["last"]:
+            s.rect(mq["x"], mq["ry"], mq["avail"], self.row_h, mq["bg"])
+            s.text(mq["x"], mq["ry"] + 1, shown, TEXT, mq["bg"])
+            s.flush()
+            mq["last"] = shown
 
     def wrap(self, text: str, px: int) -> list[str]:
         n = max(1, self.s.cols(px))
@@ -194,9 +229,11 @@ class Ui:
             out.append(line)
         return out
 
-    def draw(self) -> bool:
-        """Draw the browser; True if something moves (a long name scrolling)."""
+    def draw(self) -> None:
+        """Draw the whole browser (a long selected name then scrolls by itself
+        through step_marquee)."""
         s = self.s
+        self.mq = None
         s.fill(BG)
         self.draw_tabs()
         rows, problem = self.rows_for(self.side)
@@ -223,7 +260,6 @@ class Ui:
         s.text(self.pad, y + 1, s.fit(fold(self.crumb(), s.glyphs), cw), ACCENT, BG)
         if right:
             s.text(s.w - self.pad - len(right) * s.fw, y + 1, right, MARK if marks else DIM, BG)
-        moving = False
         y = self.list_y
         if problem or not rows:
             text = problem or ("Nothing here" if self.level() else "")
@@ -250,17 +286,10 @@ class Ui:
             avail = s.w - x - self.pad - rw
             name = fold(row["name"], s.glyphs)
             cols = s.cols(avail)
+            shown = s.fit(name, avail)
             if selected and len(name) > cols:
-                over = len(name) - cols
-                t = time.monotonic() - self.sel_since
-                step = int(max(0.0, t - 1.0) / 0.12)
-                if step > over + 12:
-                    self.sel_since = time.monotonic()
-                    step = 0
-                shown = name[min(step, over):][:cols]
-                moving = True
-            else:
-                shown = s.fit(name, avail)
+                self.mq = {"x": x, "ry": ry, "avail": avail, "bg": bg, "name": name,
+                           "cols": cols, "last": shown}
             s.text(x, ry + 1, shown, TEXT, bg)
             if rt:
                 s.text(s.w - self.pad - len(rt) * s.fw, ry + 1, rt, DIM if not selected else TEXT, bg)
@@ -276,11 +305,10 @@ class Ui:
         else:
             hint = "A open  L/R other side  B quit"
         if self.side == 1 and self.peer() is None:
-            hint = "A look again  L this one" if getattr(self.m, "port", None) else "L this one"
+            hint = "A make the port a host  L back" if getattr(self.m, "port", None) else "L back"
+        self.hint = hint
         self.draw_footer(hint)
-        s.flush()
-        st = self.m.state
-        return moving or bool(st.activity and time.monotonic() - st.activity_at < 4)
+        s.flush(full=True)
 
     # ---------------------------------------------------------- dialogs --
     def choose(self, title: str, lines: list[str], options: list[str], cur: int = 0) -> int | None:
@@ -393,28 +421,51 @@ class Ui:
 
     # ------------------------------------------------------------- loop --
     def run(self) -> None:
+        """Redraw only what changed: the whole screen after a button or a link
+        change, the bottom line for files arriving (at most once a second),
+        the selected row while its long name scrolls. A full redraw costs
+        about 60 ms of CPU on an RG Nano, and each one goes out to the panel."""
         link = None
         received = 0.0
+        full = True
         while True:
             st = self.m.state
+            now = time.monotonic()
             if (st.status, st.text) != link:
                 # linked, unlinked or relinked: the other side's lists are stale
                 link = (st.status, st.text)
                 self.forget(side=1)
+                full = True
             if st.activity.startswith("Received") and st.activity_at > received \
-                    and time.monotonic() - st.activity_at > 2:
+                    and now - st.activity_at > 2:
                 # files came in: this side's lists are stale once they stop coming
                 received = st.activity_at
                 self.forget(side=0)
-            moving = self.draw()
-            self.seen = st.version
-            btn = None
-            while btn is None:
-                btn = self.b.get(0.12 if moving else 0.5)
-                if btn is None and (moving or self.m.state.version != self.seen):
-                    break
-            if btn is not None and self.handle(btn) is False:
-                return
+                full = True
+            if full:
+                self.draw()
+                self.seen = st.version
+                full = False
+            wait = 0.15 if self.mq else 1.0
+            if st.activity and now - st.activity_at < NOTE_FOR:
+                wait = min(wait, max(0.05, st.activity_at + NOTE_FOR - now))
+            btn = self.b.get(wait)
+            if btn is not None:
+                if self.handle(btn) is False:
+                    return
+                full = True
+                continue
+            st = self.m.state
+            now = time.monotonic()
+            if (st.status, st.text) != link:
+                continue
+            if st.version != self.seen and now - self.footer_at >= 1.0:
+                self.seen = st.version
+                self.redraw_footer()
+            elif self.note_until and now >= self.note_until:
+                self.redraw_footer()
+            elif self.mq:
+                self.step_marquee()
 
     def move(self, delta: int, wrap: bool) -> None:
         rows, _ = self.rows_for(self.side)
@@ -501,7 +552,7 @@ class CopyScreen(CopyUI):
 
     def progress(self, name, index, count, done, total):
         now = time.monotonic()
-        if now - self.last < 0.25 and done < total:
+        if now - self.last < PROGRESS_EVERY and done < total:
             return True
         self.last = now
         ui, s = self.ui, self.ui.s

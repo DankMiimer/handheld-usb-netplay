@@ -86,6 +86,7 @@ class Screen:
         self.w, self.h = min(w, self.fb_w - x), min(h, self.fb_h - y)
         self.stride = self.w * self.Bpp
         self.buf = bytearray(self.stride * self.h)
+        self.shown: bytearray | None = None    # what the last flush put on the screen
         self.font = pick_font(self.w, self.h)
         self.fw, self.fh, self.glyphs = FONTS[self.font]
         self.gbytes = (self.fw + 7) // 8
@@ -165,16 +166,39 @@ class Screen:
             return s
         return (s[:n - 1] + "…") if n > 1 else s[:n]
 
-    def flush(self) -> None:
+    def flush(self, full: bool = False) -> None:
+        """Copy the rows that changed since the last flush to the screen
+        (all of them with full=True, which also covers anything another
+        program drew over us).
+
+        FunKey's SPI panel driver sends every framebuffer page that was
+        written to, so rewriting unchanged rows costs CPU and SPI time."""
         if self.mm is None:
             return
-        if self.wx == 0 and self.w == self.fb_w and self.line == self.stride:
-            off = self.wy * self.line
-            self.mm[off:off + len(self.buf)] = self.buf
+        buf, shown, st = self.buf, self.shown, self.stride
+        if shown is None or full:
+            first, last = 0, self.h - 1
+        elif buf == shown:
             return
-        for yy in range(self.h):
-            off = (self.wy + yy) * self.line + self.wx * self.Bpp
-            self.mm[off:off + self.stride] = self.buf[yy * self.stride:(yy + 1) * self.stride]
+        else:
+            first = 0
+            while buf[first * st:(first + 1) * st] == shown[first * st:(first + 1) * st]:
+                first += 1
+            last = self.h - 1
+            while buf[last * st:(last + 1) * st] == shown[last * st:(last + 1) * st]:
+                last -= 1
+        a, b = first * st, (last + 1) * st
+        if self.wx == 0 and self.w == self.fb_w and self.line == st:
+            off = (self.wy + first) * self.line
+            self.mm[off:off + b - a] = buf[a:b]
+        else:
+            for yy in range(first, last + 1):
+                off = (self.wy + yy) * self.line + self.wx * self.Bpp
+                self.mm[off:off + st] = buf[yy * st:(yy + 1) * st]
+        if shown is None:
+            self.shown = bytearray(buf)
+        else:
+            shown[a:b] = buf[a:b]
 
     def save_png(self, path: str) -> None:
         """The drawing area as a PNG (16-bit only, for previews)."""

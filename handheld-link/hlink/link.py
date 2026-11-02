@@ -227,7 +227,7 @@ class HostManager(Manager):
     def __init__(self, server, info, log, port) -> None:
         super().__init__(server, info, log)
         self.port = port
-        self.want = True                # look at once when the app starts
+        self.want = False               # A pressed: switch the port to host mode
         self.until = 0.0
         self.skip: set[str] = set()     # devices that want authentication
         self.wake = threading.Event()
@@ -272,7 +272,6 @@ class HostManager(Manager):
         for line in self.kmsg.earlier():
             self.log("kernel (before): " + line)
         self.seen_mode = self.seen_usb = self.seen_volts = None
-        started = time.monotonic()
         while not self.stopping.is_set():
             self._watch()
             devs = [d for d in adb.find_devices() if d["sysfs"] not in self.skip]
@@ -283,24 +282,27 @@ class HostManager(Manager):
                 continue
             if self.port.is_host():
                 self.port.claim()
+                self.want = False
                 # an OTG adapter makes the port a host by itself; only a host
                 # mode we switched on ourselves times out
                 if self.port.forced and time.monotonic() > self.until:
                     self.port.release()
-                    self._idle("Nothing found. Connect the other handheld with the OTG adapter, then press A")
+                    self._idle("Nothing found. Connect the other handheld with the OTG adapter")
                 else:
                     self._idle("Looking for the other handheld")
-            elif self.want and time.monotonic() - started > 3:
-                # still a USB device: the adapter didn't switch the port, so do it
+            elif self.want:
+                # A was pressed and the port is still a USB device: an adapter
+                # that doesn't switch it by itself. Never on our own: with no
+                # adapter, a PC cable plugged in next would meet our 5 V
                 self.want = False
                 why = self.port.to_host()
                 if why:
-                    self.state.set(PROBLEM, why + ". Unplug it, connect the other handheld, then press A")
+                    self.state.set(PROBLEM, why + ". Unplug it and use the OTG adapter")
                 else:
                     self.until = time.monotonic() + LOOK_FOR
                     self._idle("Looking for the other handheld")
-            elif not self.want:
-                self._idle("Connect the other handheld with the OTG adapter, then press A")
+            else:
+                self._idle("Connect the other handheld with the OTG adapter")
             self.wake.wait(0.5)
             self.wake.clear()
 
@@ -336,7 +338,7 @@ class HostManager(Manager):
             # unplugged: hand the port back at once, so a PC cable plugged in
             # next never meets this handheld's 5 V
             self.port.release()
-            self._idle("The other handheld was unplugged. Connect it again, then press A")
+            self._idle("The other handheld was unplugged. Connect it again")
 
     def _group(self, link: adb.Link, role: str) -> Conn:
         """STREAMS streams to the other handheld's service, as one connection."""
